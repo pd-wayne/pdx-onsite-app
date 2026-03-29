@@ -1,5 +1,5 @@
 {
-  "version": "1.3.3",
-  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.3.3/PDX_Onsite_App.zip",
-  "release_notes": "Save settings redirects to Live Queue, historical orders now populate correctly, Needs Attention filter, OTA update fires automatically on launch"
+  "version": "1.3.4",
+  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.3.4/PDX_Onsite_App.zip",
+  "release_notes": "Fixed completed orders not showing from previous sessions, renamed Confirm Pickup to Mark Ready for Pickup, button disabled until order number entered"
 }
