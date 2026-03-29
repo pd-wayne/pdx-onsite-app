@@ -1,5 +1,4 @@
 {
-  "version": "1.2.2",
-  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.2.2/PDX_Onsite_App.zip",
-  "release_notes": "Fixed update notification button, fixed Reprint Images availability"
-}
+  "version": "1.3.0",
+  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.3.0/PDX_Onsite_App.zip",
+  "release_notes": "Unified order table, job filter persistence, scan input fix, duplicate scan warning, live threshold updates, manual update check in Settings"
