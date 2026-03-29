@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
-  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.2.0/PDX_Onsite_App.zip",
-  "release_notes": "Searchable jobs list, full order history by job, persistent session state, order archive subfolders, job-filtered search and stats"
+  "version": "1.2.1",
+  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.2.1/PDX_Onsite_App.zip",
+  "release_notes": "Fixed: Reprint Images button now available on fulfilled and confirmed orders"
 }
