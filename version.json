@@ -1,5 +1,5 @@
 {
-  "version": "1.3.6",
-  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.3.6/PDX_Onsite_App.zip",
-  "release_notes": "Fixed completed orders not displaying, corrected status model to match PDX API"
+  "version": "1.3.7",
+  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.3.7/PDX_Onsite_App.zip",
+  "release_notes": "Fixed completed orders not displaying — missing function was crashing background startup thread"
 }
