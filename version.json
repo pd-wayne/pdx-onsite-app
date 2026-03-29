@@ -1,4 +1,5 @@
 {
   "version": "1.3.0",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.3.0/PDX_Onsite_App.zip",
-  "release_notes": "Unified order table, job filter persistence, scan input fix, duplicate scan warning, live threshold updates, manual update check in Settings"
+  "release_notes": "Unified order table, job filter persistence, scan fix, update check in Settings"
+}
