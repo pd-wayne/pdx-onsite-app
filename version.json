@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
-  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.1.0/PDX_Onsite_App.zip",
-  "release_notes": "Initial release — Live Queue, Scan to Confirm, Order History, Samples Browser, Search, Image Preview, Activity Log"
+  "version": "1.2.0",
+  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.2.0/PDX_Onsite_App.zip",
+  "release_notes": "Searchable jobs list, full order history by job, persistent session state, order archive subfolders, job-filtered search and stats"
 }
