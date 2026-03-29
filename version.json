@@ -1,5 +1,5 @@
 {
-  "version": "1.3.2",
-  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.3.2/PDX_Onsite_App.zip",
-  "release_notes": "Fixed PDX order statuses, Pending/Completed labels, renamed Unclaimed Alert to Needs Attention"
+  "version": "1.3.3",
+  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v1.3.3/PDX_Onsite_App.zip",
+  "release_notes": "Save settings redirects to Live Queue, historical orders now populate correctly, Needs Attention filter, OTA update fires automatically on launch"
 }
