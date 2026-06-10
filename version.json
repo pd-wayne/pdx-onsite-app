@@ -1,0 +1,5 @@
+{
+  "version": "2.0.0",
+  "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/download/v2.0.0/PDX_Onsite_App.zip",
+  "release_notes": "v2.0 — New UI, native ESC/POS printing (no SumatraPDF), single .exe deployment"
+}

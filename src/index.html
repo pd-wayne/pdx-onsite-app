@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDX Onsite — Pickup Station</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div id="update-progress-bar"></div>
+
+<!-- Status Bar -->
+<div id="status-bar">
+  <span class="status-brand">PDX Onsite</span>
+  <div class="status-item"><div class="status-dot" id="api-dot"></div><span id="api-status-text">Connecting…</span></div>
+  <span class="status-sep">|</span>
+  <div class="status-item">Last poll: <span id="last-poll-text">—</span></div>
+  <div class="status-item">Next in: <span id="next-poll-text">—</span></div>
+  <div id="status-counts">
+    <span class="count-chip pending" id="chip-pending">0 pending</span>
+    <span class="count-chip confirmed" id="chip-confirmed">0 confirmed</span>
+    <span class="count-chip" id="chip-total">0 total</span>
+  </div>
+  <button id="btn-poll-now" onclick="pollNow()">↻ Poll Now</button>
+  <button id="update-btn" onclick="triggerUpdate()">🔄 Update Available</button>
+</div>
+
+<!-- Search Bar -->
+<div id="search-bar">
+  <div id="search-wrap">
+    <input type="text" id="search-input" placeholder="Search order #, customer name, or image filename…" autocomplete="off" spellcheck="false" oninput="onSearch()" onkeydown="if(event.key==='Escape')clearSearch()">
+  </div>
+  <div id="search-results-count"></div>
+</div>
+
+<!-- App -->
+<div id="app">
+  <nav id="sidebar">
+    <div class="nav-section-label">Workflow</div>
+    <div class="nav-item active" onclick="showPanel('queue',this)"><span class="nav-icon">📋</span><span>Live Queue</span><span class="nav-badge zero" id="badge-queue">0</span></div>
+    <div class="nav-item" onclick="showPanel('scan',this)"><span class="nav-icon">📷</span><span>Scan to Confirm</span></div>
+    <div class="nav-item" onclick="showPanel('samples',this)"><span class="nav-icon">🖼</span><span>Samples</span></div>
+    <div class="nav-section-label">Filter by Job</div>
+    <div id="gallery-filter-wrap">
+      <input type="text" id="job-search-input" placeholder="Search jobs…" autocomplete="off"
+             oninput="onJobSearch()" onfocus="showJobDropdown()" class="job-search-input">
+      <div id="job-dropdown" style="display:none"></div>
+    </div>
+    <div class="selected-job-label" id="selected-job-label">All Jobs</div>
+    <div class="sidebar-spacer"></div>
+    <div class="nav-section-label">App</div>
+    <div class="nav-item" onclick="showPanel('settings',this)"><span class="nav-icon">⚙️</span><span>Settings</span></div>
+  </nav>
+
+  <main id="main">
+    <div id="main-content">
+
+      <!-- Hot folder warning banner -->
+      <div id="hot-folder-warning" style="display:none;margin:12px 20px 0;padding:12px 16px;background:rgba(240,82,82,.1);border:1px solid rgba(240,82,82,.3);border-radius:8px;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--red)">
+        <span style="font-size:18px">⚠️</span>
+        <span><strong>No hot folder configured.</strong> Images cannot be downloaded or printed until you set an Image Output folder in <a href="#" onclick="showPanel('settings',document.querySelector('.nav-item[onclick*=settings]'));return false;" style="color:var(--red);text-decoration:underline">Settings</a>.</span>
+      </div>
+
+      <!-- Queue -->
+      <div id="panel-queue" class="panel active">
+        <div class="panel-header" style="flex-wrap:wrap;gap:10px">
+          <h1 class="panel-title">Live Queue</h1>
+          <div style="display:flex;align-items:center;gap:12px;margin-left:auto;flex-wrap:wrap">
+            <span id="avg-wait-display" class="avg-wait-display"></span>
+            <select id="queue-filter" onchange="onQueueFilterChange()" class="form-select" style="width:auto;padding:5px 10px">
+              <option value="pending">Pending Orders</option>
+              <option value="needs_attention">Needs Attention</option>
+              <option value="all">All Orders</option>
+              <option value="completed">Completed Orders</option>
+            </select>
+            <span class="panel-sub" id="queue-sub"></span>
+          </div>
+        </div>
+        <div class="history-table-wrap" id="queue-table-wrap">
+          <table class="history-table" id="queue-table">
+            <thead><tr>
+              <th>Order #</th><th>Customer</th><th>Job</th><th>Items</th>
+              <th onclick="toggleQueueSort()" style="cursor:pointer" id="queue-sort-th">Received ↓</th>
+              <th>Wait</th><th>Status</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="queue-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Scan -->
+      <div id="panel-scan" class="panel">
+        <div class="scan-box">
+          <div class="scan-icon">⌖</div>
+          <h2 class="scan-title">Scan to Confirm Pickup</h2>
+          <p class="scan-sub">Scan the QR code on the receipt or type the order number</p>
+          <input type="text" id="scan-input" placeholder="Scan QR or type order number…" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter')submitScan()" oninput="onScanInput()">
+          <div id="scan-status"><span id="scan-status-icon">⌖</span><span id="scan-status-text">Ready — waiting for scan</span></div>
+          <button class="scan-submit-btn" id="scan-submit-btn" onclick="submitScan()" disabled>Mark Ready for Pickup</button>
+          <div class="recent-scans" id="recent-scans-wrap" style="display:none">
+            <div class="recent-label">Recent Completions</div>
+            <div id="recent-scans-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Samples -->
+      <div id="panel-samples" class="panel">
+        <div class="panel-header"><h1 class="panel-title">Samples Browser</h1><span class="panel-sub">Print display images for the table</span></div>
+        <div class="samples-toolbar">
+          <button class="btn-secondary" onclick="browseSamplesFolder()">📁 Browse Folder</button>
+          <button class="btn-secondary" onclick="loadSamples()">↻ Refresh</button>
+          <span class="samples-path" id="samples-path-display">No folder selected</span>
+          <button class="btn-secondary" onclick="selectAllSamples()">Select All</button>
+          <button class="btn-secondary" onclick="clearSampleSelection()">Clear</button>
+        </div>
+        <div class="samples-grid" id="samples-grid">
+          <div class="empty-state" style="grid-column:1/-1">
+            <div class="icon">🖼</div>
+            <div class="title">No folder selected</div>
+            <div class="sub">Click Browse Folder to select a folder of sample images</div>
+          </div>
+        </div>
+        <div class="samples-print-bar">
+          <span id="samples-selected-count">0 selected</span>
+          <button class="btn-primary" onclick="printSamples()" id="btn-print-samples" disabled>🖨 Print Selected</button>
+        </div>
+      </div>
+
+      <!-- Settings -->
+      <div id="panel-settings" class="panel">
+        <div class="panel-header"><h1 class="panel-title">Settings</h1></div>
+        <div class="settings-section">
+          <div class="settings-section-title">PDX Credentials</div>
+          <div class="form-row"><label class="form-label">Lab ID</label><input class="form-input mono" id="s-lab-id" type="text" autocomplete="off" spellcheck="false"></div>
+          <div class="form-row"><label class="form-label">API Key</label><input class="form-input mono" id="s-api-key" type="password" autocomplete="off"></div>
+          <div style="display:flex;gap:8px;margin-top:4px">
+            <button class="btn-secondary" onclick="testConnection()">Test Connection</button>
+          </div>
+          <div id="test-connection-result"></div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-title">Studio</div>
+          <div class="form-row"><label class="form-label">Studio Name</label><input class="form-input" id="s-studio-name" type="text" placeholder="e.g. Shoob Photo South"></div>
+          <div class="form-row">
+            <label class="form-label">Receipt Logo</label>
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+              <div id="logo-preview-wrap" style="display:none;width:80px;height:80px;border:1px solid var(--border2);border-radius:6px;overflow:hidden;background:var(--bg3);flex-shrink:0">
+                <img id="logo-preview" src="" style="width:100%;height:100%;object-fit:contain;padding:4px" alt="Logo">
+              </div>
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <label class="btn-secondary" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px">
+                  📁 Choose Logo…
+                  <input type="file" id="logo-file-input" accept=".png,.jpg,.jpeg,.bmp" style="display:none" onchange="uploadLogo(this)">
+                </label>
+                <span id="logo-upload-status" style="font-size:11px;color:var(--text3)">PNG or JPG — appears at top of receipt</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-title">Folders</div>
+          <div class="form-row">
+            <label class="form-label">Image Output / Hot Folder</label>
+            <div class="form-row-inline">
+              <div class="form-row" style="flex:1;margin-bottom:0"><input class="form-input mono" id="s-image-folder" type="text" placeholder="C:\DNP\Hot Folder\Prints"></div>
+              <button class="btn-secondary" onclick="browseImageFolder()">Browse…</button>
+            </div>
+            <div class="form-hint">Downloaded images land here. Point to your DNP hot folder for auto-printing.</div>
+          </div>
+          <div class="form-row">
+            <label class="form-label">Samples Folder</label>
+            <div class="form-row-inline">
+              <div class="form-row" style="flex:1;margin-bottom:0"><input class="form-input mono" id="s-samples-folder" type="text" placeholder="C:\Samples"></div>
+              <button class="btn-secondary" onclick="browseSamplesFolderSettings()">Browse…</button>
+            </div>
+            <div class="form-hint">Folder of sample/display images for the Samples Browser.</div>
+          </div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-title">Print Mode</div>
+          <div class="form-row">
+            <label class="form-label">Image Delivery</label>
+            <select class="form-select" id="s-print-mode">
+              <option value="auto">Auto — images download immediately when order arrives (DNP prints automatically)</option>
+              <option value="manual">Manual — click Send to Printer to control when each order prints</option>
+            </select>
+            <div class="form-hint">Use <strong>Auto</strong> when your DNP hot folder should print every order as it comes in. Use <strong>Manual</strong> when you want to review orders and choose when to send each one to the printer.</div>
+          </div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-title">Fulfillment Mode</div>
+          <div class="form-row">
+            <label class="form-label">Order Type to Process</label>
+            <select class="form-select" id="s-fulfillment-mode">
+              <option value="pickup">Pickup Only — onsite events (ignore ship-to-home)</option>
+              <option value="dropship">Drop Ship Only — mail orders (ignore pickup)</option>
+              <option value="both">Both — process all orders regardless of type</option>
+            </select>
+            <div class="form-hint">Controls which orders appear in the queue. Use <strong>Pickup Only</strong> at onsite events. Use <strong>Drop Ship Only</strong> at fulfillment stations.</div>
+          </div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-title">Polling &amp; Attention Alert</div>
+          <div class="form-row"><label class="form-label">Poll Interval</label>
+            <select class="form-select" id="s-poll-interval">
+              <option value="30">30 seconds</option>
+              <option value="60" selected>60 seconds</option>
+              <option value="120">2 minutes</option>
+              <option value="300">5 minutes</option>
+            </select>
+          </div>
+          <div class="form-row"><label class="form-label">Needs Attention (minutes)</label>
+            <select class="form-select" id="s-unclaimed-threshold">
+              <option value="15">15 minutes</option>
+              <option value="30" selected>30 minutes</option>
+              <option value="45">45 minutes</option>
+              <option value="60">60 minutes</option>
+            </select>
+          </div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-title">Printer</div>
+          <div class="form-row-inline">
+            <div class="form-row" style="flex:1"><label class="form-label">Printer Name</label><select class="form-select" id="s-printer-name"><option value="">Loading…</option></select></div>
+            <button class="btn-secondary" onclick="loadPrinters()" style="align-self:flex-end">↻</button>
+          </div>
+          <div class="form-row" id="printer-manual-row" style="display:none"><label class="form-label">Or enter manually</label><input class="form-input" id="s-printer-manual" type="text"></div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-title">App Updates</div>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <span style="font-size:12px;color:var(--text2)" id="settings-version-display">Version: —</span>
+            <button class="btn-secondary" onclick="manualCheckUpdate()" id="btn-check-update">Check for Updates</button>
+            <span id="settings-update-result" style="font-size:12px;min-height:16px"></span>
+          </div>
+        </div>
+        <div class="settings-save-row">
+          <button class="btn-primary" onclick="saveSettings()">Save Settings</button>
+          <button class="btn-secondary" onclick="loadSettings()">Discard</button>
+          <span id="settings-save-msg">✓ Saved</span>
+        </div>
+      </div>
+
+    </div><!-- /main-content -->
+
+    <!-- Activity Log -->
+    <div id="activity-log">
+      <div id="activity-log-inner">
+        <div class="log-header">
+          <span class="log-header-label">Activity Log</span>
+          <button id="log-toggle" onclick="toggleLog()">Hide</button>
+        </div>
+        <div id="log-lines"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- Order Detail Slide-out -->
+<div id="detail-overlay" onclick="closeDetail()"></div>
+<div id="order-detail">
+  <div class="detail-header">
+    <div>
+      <div class="detail-order-num" id="detail-order-num">—</div>
+      <div class="detail-customer" id="detail-customer">—</div>
+      <div class="detail-gallery" id="detail-gallery">—</div>
+    </div>
+    <button id="detail-close" onclick="closeDetail()">✕</button>
+  </div>
+  <div class="detail-body">
+    <div class="detail-meta-grid">
+      <div class="detail-meta-item"><div class="dm-label">Placed</div><div class="dm-value" id="detail-placed">—</div></div>
+      <div class="detail-meta-item"><div class="dm-label">Received</div><div class="dm-value" id="detail-received">—</div></div>
+      <div class="detail-meta-item"><div class="dm-label">Status</div><div class="dm-value" id="detail-status-text">—</div></div>
+      <div class="detail-meta-item"><div class="dm-label">Completed At</div><div class="dm-value" id="detail-fulfilled-text">—</div></div>
+    </div>
+    <div class="detail-section-label">Items</div>
+    <div id="detail-items"></div>
+    <div class="detail-section-label">Images</div>
+    <div class="detail-images" id="detail-images"></div>
+  </div>
+  <div class="detail-actions">
+    <div id="detail-status-badge" class="detail-status-badge pending">⏳ Awaiting Fulfill</div>
+    <button class="btn-action btn-fulfill" id="btn-detail-fulfill" onclick="detailFulfill()">🖨 Send to Printer</button>
+    <button class="btn-action btn-reprint-img" id="btn-detail-reprint-img" onclick="detailReprintImages()">🔁 Reprint Images</button>
+    <button class="btn-action btn-reprint-rcpt" onclick="detailReprintReceipt()">🧾 Reprint Receipt</button>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast-container"></div>
+
+<!-- Search Results Overlay -->
+<div id="search-overlay" style="display:none">
+  <div class="search-overlay-header">
+    <h2 style="font-size:16px;font-weight:700">Search Results</h2>
+    <button class="btn-secondary" onclick="clearSearch()">✕ Clear</button>
+  </div>
+  <div id="search-results-list"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
