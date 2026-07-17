@@ -97,7 +97,7 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
     except Exception:
         pass
 
-    sep = "\x1b\x61\x01" + ("─" * LINE_WIDTH) + "\n"  # center + separator
+    SEP = "-" * LINE_WIDTH
 
     try:
         from escpos.printer import Win32Raw
@@ -120,7 +120,7 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
         # Receipt header — centered
         p.set(align="center", bold=False, double_height=False)
         p.text("PICKUP RECEIPT\n")
-        p.text("─" * LINE_WIDTH + "\n")
+        p.text(SEP + "\n")
 
         # Customer name and order number — left aligned
         p.set(align="left", bold=True)
@@ -129,7 +129,7 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
         p.text(order_num + "\n")
         p.set(font="a")
 
-        p.text("─" * LINE_WIDTH + "\n")
+        p.text(SEP + "\n")
 
         # Items and filenames
         if items:
@@ -146,17 +146,17 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
                     p.text(f"   -> {fname[:LINE_WIDTH - 7]}\n")
                     p.set(font="a")
 
-        p.text("─" * LINE_WIDTH + "\n")
+        p.text(SEP + "\n")
 
         # Timestamp — centered
         p.set(align="center")
         if placed_at:
             p.text(f"Placed: {_fmt_dt(placed_at)}\n")
 
-        # QR code + label — centered
+        # QR code — native firmware rendering, most reliable across Epson models
         p.ln(1)
         try:
-            p.qr(order_num, size=10, center=True)
+            p.qr(order_num, size=10, center=True, native=True)
         except Exception:
             p.set(bold=True, double_height=True)
             p.text(order_num + "\n")
