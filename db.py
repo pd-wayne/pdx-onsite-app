@@ -115,13 +115,14 @@ def upsert_order(order_data: dict) -> bool:
     items = order_data.get("items", [])
     images = []
     items_summary = []
-    for item in items:
+    for idx, item in enumerate(items):
         item_images = item.get("images", [])
         image_count = len(item_images) if item_images else item.get("quantity", 1)
+        qty = item.get("quantity", 1)
         items_summary.append({
             "sku":   item.get("externalId", ""),
             "desc":  item.get("description", ""),
-            "qty":   item.get("quantity", 1),
+            "qty":   qty,
             "files": image_count,
         })
         for img in item_images:
@@ -132,6 +133,8 @@ def upsert_order(order_data: dict) -> bool:
                     "filename":  filename,
                     "assetUrl":  asset_url,
                     "item_sku":  item.get("externalId", ""),
+                    "item_idx":  idx,
+                    "item_qty":  qty,
                     "item_desc": item.get("description", ""),
                     "pose_id":   img.get("externalId", ""),
                 })

@@ -88,12 +88,17 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
     except Exception:
         items = []
 
+    images_by_idx: dict[int, list] = {}
     images_by_sku: dict[str, list] = {}
     try:
         images = json.loads(order.get("images_json", "[]"))
         for img in images:
-            sku = img.get("item_sku", "")
-            images_by_sku.setdefault(sku, []).append(img.get("filename", ""))
+            fname = img.get("filename", "")
+            sku   = img.get("item_sku", "")
+            images_by_sku.setdefault(sku, []).append(fname)
+            idx = img.get("item_idx")
+            if idx is not None:
+                images_by_idx.setdefault(idx, []).append(fname)
     except Exception:
         pass
 
@@ -137,12 +142,13 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
             p.text("ITEMS\n")
             p.set(bold=False)
             shown_files = set()
-            for it in items:
-                qty  = it.get("files") or it.get("qty", 1)
+            for item_pos, it in enumerate(items):
+                qty  = it.get("qty", 1)
                 desc = (it.get("desc") or it.get("sku") or "")[:LINE_WIDTH - 6]
                 p.text(f"{qty}x  {desc}\n")
-                sku = it.get("sku", "")
-                for fname in images_by_sku.get(sku, []):
+                # Prefer index-based grouping; fall back to SKU for old records
+                fnames = images_by_idx.get(item_pos) or images_by_sku.get(it.get("sku", ""), [])
+                for fname in fnames:
                     if fname not in shown_files:
                         shown_files.add(fname)
                         p.set(font="b")
@@ -214,18 +220,28 @@ def fulfill_to_hot_folder(images: list, output_folder: str, order_num: str = "")
     errors = []
     for img in images:
         filename = img.get("filename", "")
+        item_qty = img.get("item_qty", 1)
         if not filename:
             continue
-        src = os.path.join(output_folder, filename)
-        dst = os.path.join(archive, filename)
-        if os.path.exists(src):
-            try:
-                shutil.move(src, dst)
-                log.info(f"[HotFolder] Archived: {filename}")
-            except Exception as e:
-                errors.append(f"{filename}: {e}")
-        else:
-            log.warning(f"[HotFolder] File not found to archive: {src}")
+
+        # Build list: original + any qty copies
+        filenames_to_move = [filename]
+        if item_qty > 1:
+            base, ext = os.path.splitext(filename)
+            for copy_num in range(2, item_qty + 1):
+                filenames_to_move.append(f"{base}_q{copy_num}{ext}")
+
+        for fname in filenames_to_move:
+            src = os.path.join(output_folder, fname)
+            dst = os.path.join(archive, fname)
+            if os.path.exists(src):
+                try:
+                    shutil.move(src, dst)
+                    log.info(f"[HotFolder] Archived: {fname}")
+                except Exception as e:
+                    errors.append(f"{fname}: {e}")
+            elif fname == filename:
+                log.warning(f"[HotFolder] File not found to archive: {src}")
 
     if errors:
         return False, "; ".join(errors)
@@ -245,6 +261,7 @@ def reprint_images_to_hot_folder(images: list, output_folder: str, order_num: st
 
     for img in images:
         filename = img.get("filename", "")
+        item_qty = img.get("item_qty", 1)
         if not filename:
             continue
         dst = os.path.join(output_folder, filename)
@@ -262,6 +279,18 @@ def reprint_images_to_hot_folder(images: list, output_folder: str, order_num: st
             try:
                 shutil.copy2(src, dst)
                 log.info(f"[HotFolder] Reprint: {filename}")
+                # Recreate qty copies
+                if item_qty > 1:
+                    base, ext = os.path.splitext(filename)
+                    for copy_num in range(2, item_qty + 1):
+                        copy_name = f"{base}_q{copy_num}{ext}"
+                        copy_dst = os.path.join(output_folder, copy_name)
+                        if not os.path.exists(copy_dst):
+                            try:
+                                shutil.copy2(src, copy_dst)
+                                log.info(f"[HotFolder] Reprint copy {copy_num}: {copy_name}")
+                            except Exception as ce:
+                                errors.append(f"{copy_name}: {ce}")
             except Exception as e:
                 errors.append(f"{filename}: {e}")
         elif os.path.exists(dst):
@@ -320,6 +349,21 @@ def download_images(images: list, output_folder: str, order_num: str = "", api_k
                 for chunk in resp.iter_content(chunk_size=65536):
                     f.write(chunk)
             log.info(f"[Download] Saved: {filename} ({os.path.getsize(dest_path):,} bytes)")
+
+            # Create additional copies for qty > 1 so DNP prints the correct number
+            item_qty = img.get("item_qty", 1)
+            if item_qty > 1:
+                base, ext = os.path.splitext(filename)
+                for copy_num in range(2, item_qty + 1):
+                    copy_name = f"{base}_q{copy_num}{ext}"
+                    copy_path = os.path.join(output_folder, copy_name)
+                    if not os.path.exists(copy_path):
+                        try:
+                            shutil.copy2(dest_path, copy_path)
+                            log.info(f"[Download] Qty copy {copy_num}: {copy_name}")
+                        except Exception as ce:
+                            errors.append(f"{copy_name}: {ce}")
+
         except _requests.exceptions.Timeout:
             errors.append(f"{filename}: timed out")
         except Exception as e:
