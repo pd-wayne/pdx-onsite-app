@@ -1,16 +1,16 @@
 """
 updater.py — OTA update checker for PDX Onsite
+
 Checks GitHub for a newer version on startup.
 If found, shows a notification in the UI — user triggers the update.
-Update downloads in background, extracts over existing files, restarts app.
+Update downloads the new .exe in the background, writes a swap batch file,
+launches the batch file detached, then exits so Windows can replace the exe.
 """
 import logging
 import os
-import shutil
 import sys
-import tempfile
 import threading
-import zipfile
+import time
 from typing import Optional
 
 import requests
@@ -20,12 +20,19 @@ log = logging.getLogger("pdx.updater")
 APP_VERSION = "2.0.0"
 VERSION_URL = "https://raw.githubusercontent.com/pd-wayne/pdx-onsite-app/main/version.json"
 CHECK_TIMEOUT = 8
+EXE_NAME = "PDX_Onsite.exe"
 
 PRESERVE = {
     "pdx_onsite.db",
     "pdx_onsite_config.json",
     "pdx_onsite.log",
 }
+
+
+def _app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 def parse_version(v: str) -> tuple:
@@ -66,97 +73,75 @@ def check_for_update() -> Optional[dict]:
 
 def download_and_install(download_url: str, on_progress=None, on_complete=None, on_error=None):
     def _run():
+        app_dir = _app_dir()
+        update_exe = os.path.join(app_dir, "PDX_Onsite_update.exe")
+        current_exe = sys.executable if getattr(sys, "frozen", False) else os.path.join(app_dir, EXE_NAME)
+        bat_path = os.path.join(app_dir, "_pdx_update.bat")
+
         try:
             log.info(f"[Updater] Downloading from {download_url}")
             if on_progress:
                 on_progress(0, "Downloading update…")
 
-            resp = requests.get(download_url, stream=True, timeout=120)
+            resp = requests.get(download_url, stream=True, timeout=180)
             if not resp.ok:
                 raise Exception(f"Download failed: HTTP {resp.status_code}")
 
             total = int(resp.headers.get("content-length", 0))
             downloaded = 0
 
-            tmp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False, prefix="pdx_update_")
-            with open(tmp_zip.name, "wb") as f:
+            with open(update_exe, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=65536):
                     f.write(chunk)
                     downloaded += len(chunk)
                     if total and on_progress:
-                        pct = int(downloaded / total * 70)
+                        pct = int(downloaded / total * 90)
                         on_progress(pct, f"Downloading… {pct}%")
 
             if on_progress:
-                on_progress(70, "Extracting…")
+                on_progress(95, "Preparing update…")
 
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-            tmp_extract = tempfile.mkdtemp(prefix="pdx_update_extract_")
-
-            with zipfile.ZipFile(tmp_zip.name, "r") as zf:
-                zf.extractall(tmp_extract)
-
-            extracted_items = os.listdir(tmp_extract)
-            if len(extracted_items) == 1 and os.path.isdir(os.path.join(tmp_extract, extracted_items[0])):
-                src_dir = os.path.join(tmp_extract, extracted_items[0])
-            else:
-                src_dir = tmp_extract
-
-            if on_progress:
-                on_progress(85, "Installing…")
-
-            for item in os.listdir(src_dir):
-                if item in PRESERVE:
-                    log.info(f"[Updater] Preserving: {item}")
-                    continue
-                src = os.path.join(src_dir, item)
-                dst = os.path.join(app_dir, item)
-                try:
-                    if os.path.isdir(src):
-                        if os.path.exists(dst):
-                            shutil.rmtree(dst)
-                        shutil.copytree(src, dst)
-                    else:
-                        shutil.copy2(src, dst)
-                except Exception as e:
-                    log.warning(f"[Updater] Could not copy {item}: {e}")
-
-            try:
-                os.unlink(tmp_zip.name)
-                shutil.rmtree(tmp_extract)
-            except Exception:
-                pass
+            # Batch file: waits for app to exit, swaps exe, relaunches, deletes itself
+            bat = (
+                "@echo off\n"
+                "ping -n 4 127.0.0.1 > nul\n"
+                f"move /Y \"{update_exe}\" \"{current_exe}\"\n"
+                f"start \"\" \"{current_exe}\"\n"
+                "del \"%~f0\"\n"
+            )
+            with open(bat_path, "w") as f:
+                f.write(bat)
 
             if on_progress:
-                on_progress(100, "Update complete — restarting…")
+                on_progress(100, "Restarting…")
 
-            log.info("[Updater] Update installed — restarting app")
+            log.info("[Updater] Launching swap script and exiting")
 
             if on_complete:
                 on_complete()
 
-            import time
             time.sleep(1.5)
-            _restart()
+
+            import subprocess
+            subprocess.Popen(
+                ["cmd.exe", "/c", bat_path],
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+            )
+            os._exit(0)
 
         except Exception as e:
             log.error(f"[Updater] Update failed: {e}")
+            for path in (update_exe, bat_path):
+                try:
+                    if os.path.exists(path):
+                        os.unlink(path)
+                except Exception:
+                    pass
             if on_error:
                 on_error(str(e))
 
     threading.Thread(target=_run, daemon=True).start()
-
-
-def _restart():
-    try:
-        python = sys.executable
-        args = sys.argv[:]
-        log.info(f"[Updater] Restarting: {python} {args}")
-        import subprocess
-        subprocess.Popen([python] + args)
-        os._exit(0)
-    except Exception as e:
-        log.error(f"[Updater] Restart failed: {e}")
 
 
 def check_async(on_update_available=None):

@@ -153,10 +153,10 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
         if placed_at:
             p.text(f"Placed: {_fmt_dt(placed_at)}\n")
 
-        # Barcode + label — centered
+        # QR code + label — centered
         p.ln(1)
         try:
-            p.barcode(order_num, "CODE128", width=3, height=80, pos="BELOW", align_ct=True)
+            p.qr(order_num, size=10, center=True)
         except Exception:
             p.set(bold=True, double_height=True)
             p.text(order_num + "\n")
