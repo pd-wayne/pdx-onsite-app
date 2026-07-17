@@ -109,84 +109,41 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
         p = Win32Raw(printer_name)
         p.open()
 
-        # Logo (optional)
-        if logo_path and os.path.exists(logo_path):
-            try:
-                p.image(logo_path, center=True)
-                p.ln(1)
-            except Exception as e:
-                log.warning(f"[Printer] Logo failed: {e}")
+        # Plain ASCII text only — ESC/POS formatting commands are not reliable
+        # with this printer's Windows driver configuration. Any non-ASCII bytes
+        # (images, QR codes, formatting) corrupt the output.
 
-        # Studio name — bold, centered
         if studio_name:
-            p.set(align="center", bold=True)
             p.text(studio_name.upper() + "\n")
-
-        # Receipt header — centered
-        p.set(align="center", bold=False, double_height=False)
         p.text("PICKUP RECEIPT\n")
         p.text(SEP + "\n")
-
-        # Customer name and order number — left aligned
-        p.set(align="left", bold=True)
         p.text(customer + "\n")
-        p.set(align="left", bold=False, font="b")
         p.text(order_num + "\n")
-        p.set(font="a")
-
         p.text(SEP + "\n")
 
-        # Items and filenames
         if items:
-            p.set(bold=True)
             p.text("ITEMS\n")
-            p.set(bold=False)
             shown_files = set()
             for item_pos, it in enumerate(items):
                 qty  = it.get("qty", 1)
                 desc = (it.get("desc") or it.get("sku") or "")[:LINE_WIDTH - 6]
                 p.text(f"{qty}x  {desc}\n")
-                # Prefer index-based grouping; fall back to SKU for old records
                 fnames = images_by_idx.get(item_pos) or images_by_sku.get(it.get("sku", ""), [])
                 for fname in fnames:
                     if fname not in shown_files:
                         shown_files.add(fname)
-                        p.set(font="b")
                         p.text(f"   -> {fname[:LINE_WIDTH - 7]}\n")
-                        p.set(font="a")
+            p.text(SEP + "\n")
 
-        p.text(SEP + "\n")
-
-        # Timestamp — centered
-        p.set(align="center")
         if placed_at:
             p.text(f"Placed: {_fmt_dt(placed_at)}\n")
 
-        # QR code — generate as PIL image, print via ESC * (bitImageColumn) to avoid GS commands
-        p.set(align="center")
-        p.ln(1)
-        qr_printed = False
-        try:
-            import qrcode as _qrcode
-            _qr = _qrcode.QRCode(version=None, box_size=6, border=2)
-            _qr.add_data(order_num)
-            _qr.make(fit=True)
-            _qr_img = _qr.make_image(fill_color="black", back_color="white")
-            p.image(_qr_img.get_image(), impl="bitImageColumn", center=True)
-            qr_printed = True
-        except Exception as qr_err:
-            log.warning(f"[Printer] Image QR failed ({qr_err}), using text fallback")
-        if not qr_printed:
-            p.set(bold=True)
-            p.text(order_num + "\n")
-            p.set(bold=False)
-        p.ln(1)
-        p.set(font="b", align="center")
+        p.text("\n")
+        p.text(f"ORDER: {order_num}\n")
         p.text("Scan to confirm pickup\n")
-        p.set(font="a", align="left")
+        p.text(SEP + "\n")
 
-        # Feed and cut
-        p.ln(3)
+        p.text("\n\n\n")
         p.cut()
         p.close()
 

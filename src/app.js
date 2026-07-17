@@ -7,6 +7,7 @@ const state = {
   unclaimed_threshold: 30,
   recentScans: [],
   selectedOrder: null,
+  selectedImages: new Set(),
   samplesFolder: "",
   samplesFiles: [],
   samplesSelected: new Set(),
@@ -353,22 +354,59 @@ async function openDetail(orderNum) {
     </div>`
   ).join("") || "<div style='color:var(--text3);font-size:12px'>No items</div>";
 
-  const images = JSON.parse(order.images_json || "[]");
-  document.getElementById("detail-images").innerHTML = images.map(img =>
-    `<div>
-      <div class="detail-img-wrap">
-        <img src="/api/image/${encodeURIComponent(order.order_num)}/${encodeURIComponent(img.filename)}"
-             alt="${esc(img.filename)}"
-             data-fallback="${esc(img.assetUrl || '')}"
-             onerror="if(!this.dataset.tried&&this.dataset.fallback){this.dataset.tried=1;this.src=this.dataset.fallback}else{this.parentElement.innerHTML='<div class=img-loading style=font-size:32px>🖼</div>'}">
-      </div>
-      <div class="detail-img-name" title="${esc(img.filename)}">${esc(img.filename)}</div>
-    </div>`
-  ).join("") || "<div style='color:var(--text3);font-size:12px'>No images</div>";
+  state.selectedImages = new Set();
+  renderDetailImages(order);
 
   document.getElementById("order-detail").classList.add("open");
   document.getElementById("detail-overlay").classList.add("show");
   renderQueue();
+}
+
+function renderDetailImages(order) {
+  order = order || state.selectedOrder;
+  if (!order) return;
+  const images = JSON.parse(order.images_json || "[]");
+  const sel = state.selectedImages;
+  const n = sel.size;
+  const btn = document.getElementById("btn-detail-reprint-img");
+  if (btn) btn.textContent = n > 0 ? `🔁 Reprint (${n})` : "🔁 Reprint Images";
+
+  const wrap = document.getElementById("detail-images");
+  if (!images.length) { wrap.innerHTML = "<div style='color:var(--text3);font-size:12px'>No images</div>"; return; }
+
+  wrap.innerHTML = `
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <button class="btn-xs btn-xs-ghost" onclick="selectAllImages()">Select All</button>
+      <button class="btn-xs btn-xs-ghost" onclick="selectAllImages(false)">Deselect All</button>
+    </div>
+    <div class="detail-images-grid">
+      ${images.map(img => {
+        const checked = sel.has(img.filename);
+        return `<div class="detail-img-item${checked ? " img-selected" : ""}" onclick="toggleImageSelect('${esc(img.filename)}')">
+          <div class="detail-img-check">${checked ? "✓" : ""}</div>
+          <div class="detail-img-wrap">
+            <img src="/api/image/${encodeURIComponent(order.order_num)}/${encodeURIComponent(img.filename)}"
+                 alt="${esc(img.filename)}"
+                 data-fallback="${esc(img.assetUrl || '')}"
+                 onerror="if(!this.dataset.tried&&this.dataset.fallback){this.dataset.tried=1;this.src=this.dataset.fallback}else{this.parentElement.innerHTML='<div class=img-loading style=font-size:32px>🖼</div>'}">
+          </div>
+          <div class="detail-img-name" title="${esc(img.filename)}">${esc(img.filename)}</div>
+        </div>`;
+      }).join("")}
+    </div>`;
+}
+
+function toggleImageSelect(filename) {
+  if (state.selectedImages.has(filename)) state.selectedImages.delete(filename);
+  else state.selectedImages.add(filename);
+  renderDetailImages();
+}
+
+function selectAllImages(all = true) {
+  if (!state.selectedOrder) return;
+  const images = JSON.parse(state.selectedOrder.images_json || "[]");
+  state.selectedImages = all ? new Set(images.map(i => i.filename)) : new Set();
+  renderDetailImages();
 }
 
 function closeDetail() {
@@ -410,13 +448,17 @@ async function detailReprintImages() {
   if (!state.selectedOrder) return;
   const btn = document.getElementById("btn-detail-reprint-img");
   btn.disabled = true; btn.textContent = "⏳ Reprinting…";
-  const result = await apiPost("reprint_images", { order_num: state.selectedOrder.order_num });
+  const body = { order_num: state.selectedOrder.order_num };
+  if (state.selectedImages.size > 0) body.filenames = Array.from(state.selectedImages);
+  const result = await apiPost("reprint_images", body);
   if (result.ok) {
     toast(`🔁 Images requeued: ${state.selectedOrder.order_num}`, "success");
+    state.selectedImages = new Set();
   } else {
     toast(`Reprint failed: ${result.error}`, "error");
   }
-  btn.disabled = false; btn.textContent = "🔁 Reprint Images";
+  renderDetailImages();
+  btn.disabled = false;
 }
 
 async function detailReprintReceipt() {

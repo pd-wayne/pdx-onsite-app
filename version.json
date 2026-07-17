@@ -1,5 +1,5 @@
 {
-  "version": "2.0.4",
+  "version": "2.0.5",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.0.4 — Confirm Pickup button in order detail; QR via image (bitImageColumn); reprint falls back to re-download"
+  "release_notes": "v2.0.5 — Plain text receipt (no more garbage); image selection for reprint"
 }

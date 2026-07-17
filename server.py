@@ -312,9 +312,14 @@ def create_app(poller, ui_path: str) -> Flask:
         cfg = config.load()
         output_folder = cfg.get("image_output_folder", "")
         api_key = cfg.get("api_key", "")
+        selected_filenames = data.get("filenames")
         images = db.get_images_json(order_num)
         if not images:
             return jsonify({"ok": False, "error": "No images found"})
+        if selected_filenames:
+            images = [img for img in images if img.get("filename") in selected_filenames]
+            if not images:
+                return jsonify({"ok": False, "error": "Selected images not found in order"})
         # Try archive restore first
         ok, err = printer.reprint_images_to_hot_folder(images, output_folder, order_num=order_num)
         if ok:
