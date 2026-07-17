@@ -1,5 +1,5 @@
 {
-  "version": "2.0.0",
+  "version": "2.0.1",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.0 — New UI, native ESC/POS printing, single .exe — no Python or installer needed."
+  "release_notes": ""release_notes": "v2.0.1 — Receipt fix: QR code + separator characters"."
 }
