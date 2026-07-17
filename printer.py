@@ -117,9 +117,9 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
             except Exception as e:
                 log.warning(f"[Printer] Logo failed: {e}")
 
-        # Studio name — bold, double height, centered
+        # Studio name — bold, centered
         if studio_name:
-            p.set(align="center", bold=True, double_height=True, double_width=False)
+            p.set(align="center", bold=True)
             p.text(studio_name.upper() + "\n")
 
         # Receipt header — centered
@@ -162,20 +162,24 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
         if placed_at:
             p.text(f"Placed: {_fmt_dt(placed_at)}\n")
 
-        # QR code — set align first, omit center= param (incompatible with native=True)
+        # QR code — generate as PIL image, print via ESC * (bitImageColumn) to avoid GS commands
         p.set(align="center")
         p.ln(1)
+        qr_printed = False
         try:
-            p.qr(order_num, size=10, native=True)
+            import qrcode as _qrcode
+            _qr = _qrcode.QRCode(version=None, box_size=6, border=2)
+            _qr.add_data(order_num)
+            _qr.make(fit=True)
+            _qr_img = _qr.make_image(fill_color="black", back_color="white")
+            p.image(_qr_img.get_image(), impl="bitImageColumn", center=True)
+            qr_printed = True
         except Exception as qr_err:
-            log.warning(f"[Printer] Native QR failed ({qr_err}), trying bitmap")
-            try:
-                p.qr(order_num, size=8, native=False)
-            except Exception as qr_err2:
-                log.warning(f"[Printer] Bitmap QR also failed ({qr_err2}), using text")
-                p.set(bold=True, double_height=True)
-                p.text(order_num + "\n")
-                p.set(bold=False, double_height=False)
+            log.warning(f"[Printer] Image QR failed ({qr_err}), using text fallback")
+        if not qr_printed:
+            p.set(bold=True)
+            p.text(order_num + "\n")
+            p.set(bold=False)
         p.ln(1)
         p.set(font="b", align="center")
         p.text("Scan to confirm pickup\n")

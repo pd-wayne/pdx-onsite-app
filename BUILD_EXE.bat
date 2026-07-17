@@ -58,6 +58,9 @@ python -m PyInstaller ^
   --hidden-import "sqlite3" ^
   --hidden-import "tkinter" ^
   --hidden-import "tkinter.filedialog" ^
+  --hidden-import "qrcode" ^
+  --hidden-import "qrcode.image.pil" ^
+  --collect-all "qrcode" ^
   main.py
 
 echo.

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDX Onsite — Staff Quick Start</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    line-height: 1.6;
+    padding: 32px 20px;
+  }
+  .page { max-width: 760px; margin: 0 auto; }
+
+  /* Header */
+  .brand { font-size: 11px; font-weight: 700; letter-spacing: 0.15em; color: #6b7280; text-transform: uppercase; margin-bottom: 6px; }
+  h1 { font-size: 28px; font-weight: 800; background: linear-gradient(90deg,#a78bfa,#38bdf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 4px; }
+  .subtitle { font-size: 14px; color: #6b7280; margin-bottom: 32px; }
+
+  /* Section */
+  .section { margin-bottom: 28px; }
+  .section-num { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; background: linear-gradient(135deg,#7c3aed,#0ea5e9); color: #fff; font-size: 11px; font-weight: 800; margin-right: 10px; flex-shrink: 0; }
+  .section-title { display: flex; align-items: center; font-size: 15px; font-weight: 700; color: #f1f5f9; margin-bottom: 10px; }
+  .card { background: #1a1d27; border: 1px solid #2a2d3e; border-radius: 10px; padding: 16px 18px; }
+
+  /* Steps */
+  ol, ul { padding-left: 20px; }
+  li { font-size: 13px; color: #cbd5e1; margin-bottom: 6px; }
+  li strong { color: #f1f5f9; }
+
+  /* Key/value pairs */
+  .kv { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid #2a2d3e; font-size: 13px; align-items: flex-start; }
+  .kv:last-child { border-bottom: none; }
+  .kv-label { color: #6b7280; min-width: 130px; flex-shrink: 0; }
+  .kv-val { color: #e2e8f0; }
+
+  /* Status chips */
+  .chip { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; margin-right: 4px; }
+  .chip-pending  { background: rgba(234,179,8,.12); color: #facc15; border: 1px solid rgba(234,179,8,.25); }
+  .chip-printed  { background: rgba(59,130,246,.12); color: #60a5fa; border: 1px solid rgba(59,130,246,.25); }
+  .chip-done     { background: rgba(34,197,94,.12); color: #4ade80; border: 1px solid rgba(34,197,94,.25); }
+  .chip-alert    { background: rgba(239,68,68,.12); color: #f87171; border: 1px solid rgba(239,68,68,.25); }
+
+  /* Tip / warning boxes */
+  .tip { background: rgba(14,165,233,.08); border: 1px solid rgba(14,165,233,.2); border-radius: 8px; padding: 10px 14px; font-size: 12px; color: #7dd3fc; margin-top: 10px; }
+  .warn { background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.2); border-radius: 8px; padding: 10px 14px; font-size: 12px; color: #fca5a5; margin-top: 10px; }
+
+  /* Divider */
+  hr { border: none; border-top: 1px solid #2a2d3e; margin: 28px 0; }
+
+  /* Footer */
+  .footer { font-size: 11px; color: #374151; text-align: center; margin-top: 40px; }
+
+  /* Inline code */
+  code { font-family: monospace; background: #1e2130; border: 1px solid #2a2d3e; border-radius: 4px; padding: 1px 5px; font-size: 12px; color: #a5b4fc; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="brand">PDX Onsite — Staff Guide</div>
+  <h1>Quick Start</h1>
+  <p class="subtitle">Everything you need to run the pickup station at an onsite event.</p>
+
+  <!-- 1. First launch -->
+  <div class="section">
+    <div class="section-title"><span class="section-num">1</span> First Launch (one-time setup)</div>
+    <div class="card">
+      <ol>
+        <li>Double-click <strong>PDX_Onsite.exe</strong> — a browser window opens automatically at <code>localhost:5050</code>.</li>
+        <li>You'll land on <strong>Settings</strong>. Enter your <strong>Lab ID</strong> and <strong>API Key</strong> (provided by your PhotoDay account manager).</li>
+        <li>Click <strong>Test Connection</strong> — it should show a green checkmark and pending order count.</li>
+        <li>Set the <strong>Image Output / Hot Folder</strong> to the folder your DNP printer watches (e.g. <code>C:\DNP\HotFolder\Prints</code>). Click Browse… to pick it.</li>
+        <li>Choose your <strong>Printer</strong> from the dropdown (should auto-detect the Epson TM-M30II for receipts).</li>
+        <li>Set <strong>Fulfillment Mode → Pickup Only</strong> for onsite events.</li>
+        <li>Click <strong>Save Settings</strong>. The app polls immediately and orders appear in the queue.</li>
+      </ol>
+      <div class="tip">Settings save next to the .exe and persist across restarts — you only do this once per machine.</div>
+    </div>
+  </div>
+
+  <!-- 2. Daily startup -->
+  <div class="section">
+    <div class="section-title"><span class="section-num">2</span> Daily Startup</div>
+    <div class="card">
+      <ol>
+        <li>Double-click <strong>PDX_Onsite.exe</strong>.</li>
+        <li>Check the top status bar — the dot should be <strong>green</strong> (Connected) and you'll see pending/total order counts.</li>
+        <li>Orders start populating automatically. No other action needed.</li>
+      </ol>
+      <div class="tip">If the dot is <strong>amber</strong> (No credentials) or <strong>red</strong> (error), go to Settings and re-check your Lab ID and API Key, then Save Settings again.</div>
+    </div>
+  </div>
+
+  <!-- 3. Live Queue -->
+  <div class="section">
+    <div class="section-title"><span class="section-num">3</span> Live Queue — watching incoming orders</div>
+    <div class="card">
+      <div class="kv"><span class="kv-label">Queue tab</span><span class="kv-val">Shows all incoming orders. New orders appear automatically — no refresh needed.</span></div>
+      <div class="kv"><span class="kv-label">Status chips</span><span class="kv-val">
+        <span class="chip chip-pending">⏳ Pending</span> waiting to print &nbsp;
+        <span class="chip chip-printed">🖨 Printed</span> images sent to DNP &nbsp;
+        <span class="chip chip-done">✓ Completed</span> customer picked up
+      </span></div>
+      <div class="kv"><span class="kv-label">Needs Attention</span><span class="kv-val"><span class="chip chip-alert">⚠ Needs Attention</span> order has been waiting longer than the threshold (default 30 min). Use the filter dropdown to show only these.</span></div>
+      <div class="kv"><span class="kv-label">Filter by Job</span><span class="kv-val">Use the search box in the left sidebar to filter the queue to one specific event/gallery. Click <strong>All Jobs</strong> to go back to all orders.</span></div>
+      <div class="kv"><span class="kv-label">View detail</span><span class="kv-val">Click any row (or the <strong>View</strong> button) to see order items, images, and action buttons in a slide-out panel.</span></div>
+    </div>
+  </div>
+
+  <!-- 4. Print modes -->
+  <div class="section">
+    <div class="section-title"><span class="section-num">4</span> Print Modes</div>
+    <div class="card">
+      <div class="kv"><span class="kv-label"><strong>Auto</strong> (recommended)</span><span class="kv-val">Images download to the hot folder the moment an order arrives. The DNP printer fires automatically. Nothing to click.</span></div>
+      <div class="kv"><span class="kv-label"><strong>Manual</strong></span><span class="kv-val">Images don't download until you open an order and click <strong>Send to Printer</strong>. Use this when you want to control when each order prints.</span></div>
+      <div class="kv"><span class="kv-label">Send to Printer</span><span class="kv-val">In manual mode (or to reprint), open an order detail and click <strong>🖨 Send to Printer</strong>. The button is disabled once already sent.</span></div>
+      <div class="kv"><span class="kv-label">Reprint Images</span><span class="kv-val">Click <strong>🔁 Reprint Images</strong> in the order detail to resend images to the hot folder (for reprints / rejects).</span></div>
+      <div class="kv"><span class="kv-label">Reprint Receipt</span><span class="kv-val">Click <strong>🧾 Reprint Receipt</strong> to re-print the ESC/POS receipt to the Epson printer.</span></div>
+    </div>
+  </div>
+
+  <!-- 5. Scan to confirm -->
+  <div class="section">
+    <div class="section-title"><span class="section-num">5</span> Scan to Confirm Pickup</div>
+    <div class="card">
+      <ol>
+        <li>Click <strong>📷 Scan to Confirm</strong> in the left sidebar.</li>
+        <li>Scan the QR code on the customer's receipt, or type the order number manually.</li>
+        <li>The field turns green with the customer name. Click <strong>Mark Ready for Pickup</strong> (or press Enter).</li>
+        <li>The order moves from the queue to Completed. The status bar count updates instantly.</li>
+      </ol>
+      <div class="tip">Recent completions appear below the scan box so you can see what was just confirmed.</div>
+      <div class="warn">If the scan shows "already completed" — the customer's order was previously confirmed. Check the queue history or search for the order number.</div>
+    </div>
+  </div>
+
+  <!-- 6. Search -->
+  <div class="section">
+    <div class="section-title"><span class="section-num">6</span> Search</div>
+    <div class="card">
+      <ol>
+        <li>Click the search bar at the top of the screen.</li>
+        <li>Type any part of an order number, customer name, or image filename.</li>
+        <li>Results appear as cards — click any to open the order detail.</li>
+        <li>Press <strong>Escape</strong> or click ✕ to clear the search.</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- 7. Samples browser -->
+  <div class="section">
+    <div class="section-title"><span class="section-num">7</span> Samples Browser</div>
+    <div class="card">
+      <ol>
+        <li>Click <strong>🖼 Samples</strong> in the sidebar.</li>
+        <li>Click <strong>Browse Folder</strong> to pick a folder of display/sample images.</li>
+        <li>Click thumbnails to select them (or <strong>Select All</strong>).</li>
+        <li>Click <strong>🖨 Print Selected</strong> to send them to the DNP printer.</li>
+      </ol>
+      <div class="tip">You can configure the Samples Folder path in Settings so it loads automatically on startup.</div>
+    </div>
+  </div>
+
+  <!-- 8. Troubleshooting -->
+  <div class="section">
+    <div class="section-title"><span class="section-num">8</span> Quick Troubleshooting</div>
+    <div class="card">
+      <div class="kv"><span class="kv-label">No orders showing</span><span class="kv-val">Check the status bar — is it green? If not, go to Settings → Test Connection. Also check Fulfillment Mode is set correctly (Pickup Only for onsite events).</span></div>
+      <div class="kv"><span class="kv-label">Images not printing</span><span class="kv-val">Check that the Image Output folder in Settings points to the actual DNP hot folder. Open an order and look for a ⚠ download error icon.</span></div>
+      <div class="kv"><span class="kv-label">Receipt not printing</span><span class="kv-val">Go to Settings → Printer, confirm the Epson TM-M30II is selected. Click ↻ to re-detect printers.</span></div>
+      <div class="kv"><span class="kv-label">Status bar is amber</span><span class="kv-val">"No credentials" — go to Settings, re-enter Lab ID and API Key, Save Settings.</span></div>
+      <div class="kv"><span class="kv-label">Browser closed by accident</span><span class="kv-val">Navigate to <code>localhost:5050</code> in any browser — the app is still running in the background.</span></div>
+      <div class="kv"><span class="kv-label">App won't start</span><span class="kv-val">Check if another instance is already running (look in the Windows taskbar). Only one copy can run at a time.</span></div>
+      <div class="kv"><span class="kv-label">Poll Now</span><span class="kv-val">Click the <strong>↻ Poll Now</strong> button in the top bar to force an immediate check for new orders.</span></div>
+    </div>
+  </div>
+
+  <hr>
+  <div class="footer">PDX Onsite v2.0 · For setup help contact your PhotoDay account manager</div>
+
+</div>
+</body>
+</html>

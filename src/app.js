@@ -342,12 +342,13 @@ async function openDetail(orderNum) {
   const isFulfilled = order.fulfill_status === "fulfilled";
   const isConfirmed = order.status === "fulfilled";
   document.getElementById("btn-detail-fulfill").disabled = isFulfilled || isConfirmed;
+  document.getElementById("btn-detail-confirm").disabled = isConfirmed;
   document.getElementById("btn-detail-reprint-img").disabled = !isFulfilled && !isConfirmed;
 
   const items = parseItems(order.items_json);
   document.getElementById("detail-items").innerHTML = items.map(it =>
     `<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
-      <span style="color:var(--accent);font-weight:700">${it.files||it.qty}×</span>
+      <span style="color:var(--accent);font-weight:700">${it.qty||it.files||1}×</span>
       <span style="color:var(--text)">${esc(it.desc||it.sku)}</span>
     </div>`
   ).join("") || "<div style='color:var(--text3);font-size:12px'>No items</div>";
@@ -388,6 +389,20 @@ async function detailFulfill() {
   } else {
     toast(`Fulfill failed: ${result.error}`, "error");
     btn.disabled = false; btn.textContent = "🖨 Send to Printer";
+  }
+}
+
+async function detailConfirmPickup() {
+  if (!state.selectedOrder) return;
+  const btn = document.getElementById("btn-detail-confirm");
+  btn.disabled = true; btn.textContent = "⏳ Confirming…";
+  const result = await apiPost("confirm_order", { order_num: state.selectedOrder.order_num });
+  if (result.ok) {
+    toast(`✅ Pickup confirmed: ${state.selectedOrder.order_num}`, "success");
+    await openDetail(state.selectedOrder.order_num);
+  } else {
+    toast(`Confirm failed: ${result.error}`, "error");
+    btn.disabled = false; btn.textContent = "✅ Confirm Pickup";
   }
 }
 

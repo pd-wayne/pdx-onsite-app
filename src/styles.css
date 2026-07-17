@@ -367,6 +367,8 @@ body{display:flex;flex-direction:column}
 .btn-reprint-img:hover:not(:disabled){border-color:rgba(245,166,35,.4);color:var(--amber)}
 .btn-reprint-rcpt{background:var(--bg3);border:1px solid var(--border);color:var(--text2)}
 .btn-reprint-rcpt:hover:not(:disabled){border-color:var(--border2);color:var(--text)}
+.btn-confirm{background:var(--green);color:#fff}
+.btn-confirm:hover:not(:disabled){background:#0ab870}
 .btn-action:disabled{opacity:.28;cursor:not-allowed}
 #detail-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:499;display:none;backdrop-filter:blur(2px)}
 #detail-overlay.show{display:block}

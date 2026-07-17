@@ -311,13 +311,22 @@ def create_app(poller, ui_path: str) -> Flask:
         order_num = data.get("order_num", "")
         cfg = config.load()
         output_folder = cfg.get("image_output_folder", "")
+        api_key = cfg.get("api_key", "")
         images = db.get_images_json(order_num)
         if not images:
             return jsonify({"ok": False, "error": "No images found"})
+        # Try archive restore first
         ok, err = printer.reprint_images_to_hot_folder(images, output_folder, order_num=order_num)
         if ok:
             _log(f"🔁 Reprint queued: {order_num}")
-        return jsonify({"ok": ok, "error": err if not ok else ""})
+            return jsonify({"ok": True})
+        # Fall back to re-downloading from API (files may have been consumed by DNP)
+        _log(f"🔁 Archive not found, re-downloading {order_num}…")
+        ok2, err2 = printer.download_images(images, output_folder, order_num=order_num, api_key=api_key)
+        if ok2:
+            _log(f"🔁 Reprint re-downloaded: {order_num}")
+            return jsonify({"ok": True})
+        return jsonify({"ok": False, "error": err2})
 
     @app.route("/api/retry_download", methods=["POST"])
     def retry_download():
