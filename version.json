@@ -1,5 +1,5 @@
 {
-  "version": "2.0.1",
+  "version": "2.0.2",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": ""release_notes": "v2.0.1 — Receipt fix: QR code + separator characters"."
+  "release_notes": "v2.0.2 — Receipt fix: duplicate filenames + QR code rendering"
 }
