@@ -70,29 +70,19 @@ def _fmt_dt(iso_str: str) -> str:
         return iso_str[:16]
 
 
-def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_path: str = "") -> tuple[bool, str]:
-    """Print an ESC/POS receipt to a Windows thermal printer (Epson TM-M30II or compatible)."""
-    if not IS_WINDOWS:
-        return False, "Printing only supported on Windows"
-    if not printer_name:
-        return False, "No printer configured"
-
-    order_num   = order.get("order_num", "")
-    customer    = order.get("customer_name", "Unknown")
-    gallery     = order.get("gallery", "")
-    placed_at   = order.get("placed_at", "")
-    received_at = order.get("received_at", datetime.now().isoformat())
-
+def _parse_order_data(order: dict):
+    """Extract and parse all fields needed for receipt printing."""
+    order_num = order.get("order_num", "")
+    customer  = order.get("customer_name", "Unknown")
+    placed_at = order.get("placed_at", "")
     try:
         items = json.loads(order.get("items_json", "[]"))
     except Exception:
         items = []
-
     images_by_idx: dict[int, list] = {}
     images_by_sku: dict[str, list] = {}
     try:
-        images = json.loads(order.get("images_json", "[]"))
-        for img in images:
+        for img in json.loads(order.get("images_json", "[]")):
             fname = img.get("filename", "")
             sku   = img.get("item_sku", "")
             images_by_sku.setdefault(sku, []).append(fname)
@@ -101,9 +91,107 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
                 images_by_idx.setdefault(idx, []).append(fname)
     except Exception:
         pass
+    return order_num, customer, placed_at, items, images_by_idx, images_by_sku
 
+
+def _print_receipt_gdi(order_num, customer, placed_at, items, images_by_idx,
+                       images_by_sku, printer_name, studio_name) -> tuple[bool, str]:
+    """Print receipt using Windows GDI — renders text + QR as raster, works with any driver."""
+    try:
+        import win32ui
+        import qrcode
+        from PIL import Image, ImageWin
+
+        hdc = win32ui.CreateDC()
+        hdc.CreatePrinterDC(printer_name)
+
+        dpi_x = hdc.GetDeviceCaps(88)   # LOGPIXELSX
+        dpi_y = hdc.GetDeviceCaps(90)   # LOGPIXELSY
+        pw    = hdc.GetDeviceCaps(8)    # HORZRES (printable width in pixels)
+
+        font_h = -int(dpi_y * 9 / 72)  # 9pt
+        font = win32ui.CreateFont({"name": "Courier New", "height": font_h, "weight": 400})
+
+        hdc.StartDoc("PDX Onsite Receipt")
+        hdc.StartPage()
+        hdc.SelectObject(font)
+
+        tm     = hdc.GetTextMetrics()
+        line_h = tm["Height"] + tm["ExternalLeading"]
+        char_w, _ = hdc.GetTextExtent("M")
+        line_chars = max(20, pw // char_w)
+        SEP = "-" * line_chars
+
+        y = 0
+
+        def out(text):
+            nonlocal y
+            hdc.TextOut(0, y, str(text))
+            y += line_h
+
+        if studio_name:
+            out(studio_name.upper())
+        out("PICKUP RECEIPT")
+        out(SEP)
+        out(customer)
+        out(order_num)
+        out(SEP)
+
+        if items:
+            out("ITEMS")
+            shown = set()
+            for i, it in enumerate(items):
+                qty  = it.get("qty", 1)
+                desc = (it.get("desc") or it.get("sku") or "")[:line_chars - 6]
+                out(f"{qty}x  {desc}")
+                fnames = images_by_idx.get(i) or images_by_sku.get(it.get("sku", ""), [])
+                for fname in fnames:
+                    if fname not in shown:
+                        shown.add(fname)
+                        out(f"   -> {fname[:line_chars - 7]}")
+            out(SEP)
+
+        if placed_at:
+            out(f"Placed: {_fmt_dt(placed_at)}")
+
+        out("")
+        out(f"ORDER: {order_num}")
+        out("Scan to confirm pickup")
+        out("")
+
+        # QR code rendered as bitmap — bypasses ESC/POS command issues entirely
+        qr = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=6, border=2,
+        )
+        qr.add_data(order_num)
+        qr.make(fit=True)
+        qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        qr_size = int(dpi_x * 1.5)  # 1.5 inches
+        qr_img  = qr_img.resize((qr_size, qr_size), Image.NEAREST)
+        x_qr    = max(0, (pw - qr_size) // 2)
+
+        dib = ImageWin.Dib(qr_img)
+        dib.draw(hdc.GetSafeHdc(), (x_qr, y, x_qr + qr_size, y + qr_size))
+        y += qr_size + line_h
+
+        out(SEP)
+
+        hdc.EndPage()
+        hdc.EndDoc()
+        hdc.DeleteDC()
+
+        return True, ""
+
+    except Exception as e:
+        log.warning(f"[Printer] GDI print failed: {e}")
+        return False, str(e)
+
+
+def _print_receipt_escpos(order_num, customer, placed_at, items, images_by_idx,
+                          images_by_sku, printer_name, studio_name) -> tuple[bool, str]:
+    """Plain ASCII ESC/POS fallback — no QR code, works even if GDI is unavailable."""
     SEP = "-" * LINE_WIDTH
-
     try:
         from escpos.printer import Win32Raw
         p = Win32Raw(printer_name)
@@ -119,15 +207,15 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
 
         if items:
             p.text("ITEMS\n")
-            shown_files = set()
+            shown = set()
             for item_pos, it in enumerate(items):
                 qty  = it.get("qty", 1)
                 desc = (it.get("desc") or it.get("sku") or "")[:LINE_WIDTH - 6]
                 p.text(f"{qty}x  {desc}\n")
                 fnames = images_by_idx.get(item_pos) or images_by_sku.get(it.get("sku", ""), [])
                 for fname in fnames:
-                    if fname not in shown_files:
-                        shown_files.add(fname)
+                    if fname not in shown:
+                        shown.add(fname)
                         p.text(f"   -> {fname[:LINE_WIDTH - 7]}\n")
             p.text(SEP + "\n")
 
@@ -137,24 +225,39 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
         p.text("\n")
         p.text(f"ORDER: {order_num}\n")
         p.text("Scan to confirm pickup\n")
-
-        try:
-            p.qr(order_num, native=True, size=5)
-            p.text("\n")
-        except Exception as qr_err:
-            log.warning(f"[Printer] QR code failed: {qr_err}")
-
         p.text(SEP + "\n")
         p.text("\n\n\n")
         p.cut()
         p.close()
 
-        log.info(f"[Printer] Receipt printed: {order_num}")
         return True, ""
 
     except Exception as e:
         log.error(f"[Printer] ESC/POS error for {order_num}: {e}")
         return False, str(e)
+
+
+def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_path: str = "") -> tuple[bool, str]:
+    """Print receipt to a Windows thermal printer. Tries GDI (with QR) first, falls back to ESC/POS text."""
+    if not IS_WINDOWS:
+        return False, "Printing only supported on Windows"
+    if not printer_name:
+        return False, "No printer configured"
+
+    order_num, customer, placed_at, items, images_by_idx, images_by_sku = _parse_order_data(order)
+
+    ok, err = _print_receipt_gdi(order_num, customer, placed_at, items,
+                                  images_by_idx, images_by_sku, printer_name, studio_name)
+    if ok:
+        log.info(f"[Printer] Receipt printed (GDI+QR): {order_num}")
+        return True, ""
+
+    log.warning(f"[Printer] GDI failed ({err}), falling back to ESC/POS text")
+    ok, err = _print_receipt_escpos(order_num, customer, placed_at, items,
+                                     images_by_idx, images_by_sku, printer_name, studio_name)
+    if ok:
+        log.info(f"[Printer] Receipt printed (ESC/POS text): {order_num}")
+    return ok, err
 
 
 # ── Hot folder management ─────────────────────────────────────────────────────
