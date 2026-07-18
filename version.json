@@ -1,5 +1,5 @@
 {
-  "version": "2.0.7",
+  "version": "2.0.8",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.0.7 — QR code re-enabled on receipt (printer is in RAW mode)"
+  "release_notes": "v2.0.8 — QR code via PIL image rendering; fix detail pane image grid alignment"
 }

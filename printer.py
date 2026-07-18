@@ -96,86 +96,105 @@ def _parse_order_data(order: dict):
 
 def _print_receipt_gdi(order_num, customer, placed_at, items, images_by_idx,
                        images_by_sku, printer_name, studio_name) -> tuple[bool, str]:
-    """Print receipt using Windows GDI — renders text + QR as raster, works with any driver."""
+    """
+    Print receipt using Windows GDI + PIL.
+    Renders the entire receipt (text + QR) as a raster PIL image, then sends
+    it to the printer via ImageWin.Dib. Bypasses ESC/POS entirely so it works
+    with any Windows printer driver regardless of byte-stripping behaviour.
+    """
     try:
         import win32ui
         import qrcode
-        from PIL import Image, ImageWin
+        from PIL import Image, ImageDraw, ImageFont, ImageWin
 
-        hdc = win32ui.CreateDC()
-        hdc.CreatePrinterDC(printer_name)
+        # ── Probe printer DPI and printable width ────────────────────────────
+        hdc_probe = win32ui.CreateDC()
+        hdc_probe.CreatePrinterDC(printer_name)
+        dpi_x = hdc_probe.GetDeviceCaps(88)   # LOGPIXELSX
+        dpi_y = hdc_probe.GetDeviceCaps(90)   # LOGPIXELSY
+        pw    = hdc_probe.GetDeviceCaps(8)    # HORZRES (printable width)
+        hdc_probe.DeleteDC()
 
-        dpi_x = hdc.GetDeviceCaps(88)   # LOGPIXELSX
-        dpi_y = hdc.GetDeviceCaps(90)   # LOGPIXELSY
-        pw    = hdc.GetDeviceCaps(8)    # HORZRES (printable width in pixels)
+        # ── Font (Windows system Courier New — always present) ────────────────
+        pt = 9
+        font_px = max(12, int(dpi_y * pt / 72))
+        try:
+            font = ImageFont.truetype("C:/Windows/Fonts/cour.ttf", font_px)
+        except Exception:
+            font = ImageFont.load_default()
 
-        font_h = -int(dpi_y * 9 / 72)  # 9pt
-        font = win32ui.CreateFont({"name": "Courier New", "height": font_h, "weight": 400})
-
-        hdc.StartDoc("PDX Onsite Receipt")
-        hdc.StartPage()
-        hdc.SelectObject(font)
-
-        tm     = hdc.GetTextMetrics()
-        line_h = tm["Height"] + tm["ExternalLeading"]
-        char_w, _ = hdc.GetTextExtent("M")
+        line_h = int(font_px * 1.35)
+        # Estimate chars per line from average char width (~0.6× height for Courier)
+        char_w = max(1, int(font_px * 0.6))
         line_chars = max(20, pw // char_w)
         SEP = "-" * line_chars
 
-        y = 0
-
-        def out(text):
-            nonlocal y
-            hdc.TextOut(0, y, str(text))
-            y += line_h
-
+        # ── Build receipt lines ───────────────────────────────────────────────
+        lines = []
         if studio_name:
-            out(studio_name.upper())
-        out("PICKUP RECEIPT")
-        out(SEP)
-        out(customer)
-        out(order_num)
-        out(SEP)
+            lines.append(studio_name.upper())
+        lines.append("PICKUP RECEIPT")
+        lines.append(SEP)
+        lines.append(customer)
+        lines.append(order_num)
+        lines.append(SEP)
 
         if items:
-            out("ITEMS")
+            lines.append("ITEMS")
             shown = set()
             for i, it in enumerate(items):
                 qty  = it.get("qty", 1)
                 desc = (it.get("desc") or it.get("sku") or "")[:line_chars - 6]
-                out(f"{qty}x  {desc}")
+                lines.append(f"{qty}x  {desc}")
                 fnames = images_by_idx.get(i) or images_by_sku.get(it.get("sku", ""), [])
                 for fname in fnames:
                     if fname not in shown:
                         shown.add(fname)
-                        out(f"   -> {fname[:line_chars - 7]}")
-            out(SEP)
+                        lines.append(f"   -> {fname[:line_chars - 7]}")
+            lines.append(SEP)
 
         if placed_at:
-            out(f"Placed: {_fmt_dt(placed_at)}")
+            lines.append(f"Placed: {_fmt_dt(placed_at)}")
+        lines.append("")
+        lines.append(f"ORDER: {order_num}")
+        lines.append("Scan to confirm pickup")
+        lines.append("")
 
-        out("")
-        out(f"ORDER: {order_num}")
-        out("Scan to confirm pickup")
-        out("")
-
-        # QR code rendered as bitmap — bypasses ESC/POS command issues entirely
+        # ── Build QR image ────────────────────────────────────────────────────
         qr = qrcode.QRCode(
             error_correction=qrcode.constants.ERROR_CORRECT_M,
             box_size=6, border=2,
         )
         qr.add_data(order_num)
         qr.make(fit=True)
-        qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-        qr_size = int(dpi_x * 1.5)  # 1.5 inches
+        qr_img  = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        qr_size = int(dpi_x * 1.5)   # 1.5 inches
         qr_img  = qr_img.resize((qr_size, qr_size), Image.NEAREST)
-        x_qr    = max(0, (pw - qr_size) // 2)
 
-        dib = ImageWin.Dib(qr_img)
-        dib.draw(hdc.GetSafeHdc(), (x_qr, y, x_qr + qr_size, y + qr_size))
-        y += qr_size + line_h
+        # ── Compose full receipt as PIL image ─────────────────────────────────
+        total_h = len(lines) * line_h + qr_size + line_h * 2
+        img  = Image.new("RGB", (pw, total_h), "white")
+        draw = ImageDraw.Draw(img)
 
-        out(SEP)
+        y = 0
+        for line in lines:
+            draw.text((0, y), line, fill="black", font=font)
+            y += line_h
+
+        x_qr = max(0, (pw - qr_size) // 2)
+        img.paste(qr_img, (x_qr, y))
+        y += qr_size + 4
+
+        draw.text((0, y), SEP, fill="black", font=font)
+
+        # ── Send to printer via GDI ───────────────────────────────────────────
+        hdc = win32ui.CreateDC()
+        hdc.CreatePrinterDC(printer_name)
+        hdc.StartDoc("PDX Onsite Receipt")
+        hdc.StartPage()
+
+        dib = ImageWin.Dib(img)
+        dib.draw(hdc.GetSafeHdc(), (0, 0, pw, total_h))
 
         hdc.EndPage()
         hdc.EndDoc()

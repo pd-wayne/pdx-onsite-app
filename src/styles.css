@@ -343,7 +343,7 @@ body{display:flex;flex-direction:column}
 .detail-meta-item{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px}
 .detail-meta-item .dm-label{font-size:10px;color:var(--text3);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
 .detail-meta-item .dm-value{font-size:13px;font-weight:600;color:var(--text);margin-top:3px}
-.detail-images{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px}
+.detail-images{display:block}
 .detail-images-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px}
 .detail-img-item{cursor:pointer;border-radius:8px;border:2px solid transparent;transition:border-color .15s}
 .detail-img-item:hover{border-color:var(--border2)}
