@@ -17,7 +17,7 @@ import requests
 
 log = logging.getLogger("pdx.updater")
 
-APP_VERSION = "2.0.5"
+APP_VERSION = "2.0.6"
 VERSION_URL = "https://raw.githubusercontent.com/pd-wayne/pdx-onsite-app/main/version.json"
 CHECK_TIMEOUT = 8
 EXE_NAME = "PDX_Onsite.exe"
@@ -73,10 +73,12 @@ def check_for_update() -> Optional[dict]:
 
 def download_and_install(download_url: str, on_progress=None, on_complete=None, on_error=None):
     def _run():
+        import tempfile
         app_dir = _app_dir()
-        update_exe = os.path.join(app_dir, "PDX_Onsite_update.exe")
+        tmp_dir = tempfile.gettempdir()
+        update_exe = os.path.join(tmp_dir, "PDX_Onsite_update.exe")
         current_exe = sys.executable if getattr(sys, "frozen", False) else os.path.join(app_dir, EXE_NAME)
-        bat_path = os.path.join(app_dir, "_pdx_update.bat")
+        bat_path = os.path.join(tmp_dir, "_pdx_update.bat")
 
         try:
             log.info(f"[Updater] Downloading from {download_url}")
@@ -132,7 +134,12 @@ def download_and_install(download_url: str, on_progress=None, on_complete=None, 
 
         except Exception as e:
             log.error(f"[Updater] Update failed: {e}")
-            for path in (update_exe, bat_path):
+            import tempfile
+            tmp_dir = tempfile.gettempdir()
+            for path in (
+                os.path.join(tmp_dir, "PDX_Onsite_update.exe"),
+                os.path.join(tmp_dir, "_pdx_update.bat"),
+            ):
                 try:
                     if os.path.exists(path):
                         os.unlink(path)
