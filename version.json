@@ -1,5 +1,5 @@
 {
-  "version": "2.0.8",
+  "version": "2.0.9",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.0.8 — QR code via PIL image rendering; fix detail pane image grid alignment"
+  "release_notes": "v2.0.9 — Larger QR code (2 inch, sharp modules) for handheld scanner compatibility"
 }

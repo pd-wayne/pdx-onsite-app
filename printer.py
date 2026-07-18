@@ -161,15 +161,19 @@ def _print_receipt_gdi(order_num, customer, placed_at, items, images_by_idx,
         lines.append("")
 
         # ── Build QR image ────────────────────────────────────────────────────
+        # Compute box_size so the QR prints at ~2 inches without any resize step.
+        # Resizing blurs module edges; generating at target size keeps them sharp.
+        target_px = int(dpi_x * 2.0)   # 2 inches
+        # Version 2 QR (worst case for short order#): 25 modules + 2*4 quiet zone = 33
+        box_size  = max(6, target_px // 33)
         qr = qrcode.QRCode(
             error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=6, border=2,
+            box_size=box_size, border=4,
         )
         qr.add_data(order_num)
         qr.make(fit=True)
         qr_img  = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-        qr_size = int(dpi_x * 1.5)   # 1.5 inches
-        qr_img  = qr_img.resize((qr_size, qr_size), Image.NEAREST)
+        qr_size = qr_img.size[0]   # use actual generated size, no resize
 
         # ── Compose full receipt as PIL image ─────────────────────────────────
         total_h = len(lines) * line_h + qr_size + line_h * 2
