@@ -109,10 +109,6 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
         p = Win32Raw(printer_name)
         p.open()
 
-        # Plain ASCII text only — ESC/POS formatting commands are not reliable
-        # with this printer's Windows driver configuration. Any non-ASCII bytes
-        # (images, QR codes, formatting) corrupt the output.
-
         if studio_name:
             p.text(studio_name.upper() + "\n")
         p.text("PICKUP RECEIPT\n")
@@ -141,8 +137,14 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
         p.text("\n")
         p.text(f"ORDER: {order_num}\n")
         p.text("Scan to confirm pickup\n")
-        p.text(SEP + "\n")
 
+        try:
+            p.qr(order_num, native=True, size=5)
+            p.text("\n")
+        except Exception as qr_err:
+            log.warning(f"[Printer] QR code failed: {qr_err}")
+
+        p.text(SEP + "\n")
         p.text("\n\n\n")
         p.cut()
         p.close()

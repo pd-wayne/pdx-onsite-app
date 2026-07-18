@@ -1,5 +1,5 @@
 {
-  "version": "2.0.6",
+  "version": "2.0.7",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.0.6 — Fix OTA update on restricted directories (download to temp folder)"
+  "release_notes": "v2.0.7 — QR code re-enabled on receipt (printer is in RAW mode)"
 }
