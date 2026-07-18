@@ -5,29 +5,26 @@ echo  PDX Onsite v2.0 - Build EXE
 echo ===================================
 echo.
 
-:: Require Python 3.12 — Python 3.14+ causes PyInstaller DLL loading errors on Windows
-:: Install Python 3.12 from https://python.org/downloads/ if not present
-py -3.12 --version >nul 2>&1
+:: Check Python is available
+python --version >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Python 3.12 not found.
-    echo PyInstaller requires Python 3.12 for stable Windows builds.
-    echo Python 3.14 causes DLL loading errors at runtime.
+    echo ERROR: Python not found. Python is required to BUILD the exe.
+    echo Once built, the exe runs on any Windows machine with no Python needed.
     echo.
-    echo Install Python 3.12 from https://python.org/downloads/
+    echo Install Python from https://python.org
     echo IMPORTANT: check "Add Python to PATH" during install.
-    echo You can keep Python 3.14 installed alongside it.
     pause
     exit /b 1
 )
 
-for /f "tokens=*" %%i in ('py -3.12 --version 2^>^&1') do set PYVER=%%i
+for /f "tokens=*" %%i in ('python --version 2^>^&1') do set PYVER=%%i
 echo Found: %PYVER%
 echo.
 
 :: Install PyInstaller and dependencies
 echo Installing dependencies...
-py -3.12 -m pip install pyinstaller
-py -3.12 -m pip install -r requirements.txt
+python -m pip install pyinstaller
+python -m pip install -r requirements.txt
 echo.
 
 :: Clean previous build artifacts
@@ -39,7 +36,7 @@ if exist "PDX_Onsite.spec" del /f "PDX_Onsite.spec"
 echo Building exe (this takes 1-3 minutes)...
 echo.
 
-py -3.12 -m PyInstaller ^
+python -m PyInstaller ^
   --onefile ^
   --windowed ^
   --name "PDX_Onsite" ^
