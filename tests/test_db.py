@@ -160,6 +160,38 @@ class TestGetQueue:
         result = db.get_queue(gallery_filter="Sports Day")
         assert len(result) == 5
 
+    def test_order_has_empty_items_list_when_none_created(self, fresh_db, pickup_order):
+        db.upsert_order(pickup_order)
+        result = db.get_queue()
+        assert result[0]["items"] == []
+
+    def test_order_items_attached_correctly(self, fresh_db, pickup_order):
+        db.upsert_order(pickup_order)
+        order = db.get_order("GS1777844776")
+        db.seed_default_destination("/tmp/hotfolder")
+        dest = db.get_default_destination()
+        db.insert_order_item(order["id"], "a.jpg", "8x24", dest["id"])
+        db.insert_order_item(order["id"], "b.jpg", "5x7", dest["id"])
+
+        result = db.get_queue()
+        items = result[0]["items"]
+        assert len(items) == 2
+        assert {i["print_spec"] for i in items} == {"8x24", "5x7"}
+        assert all(i["status"] == "queued" for i in items)
+
+    def test_items_not_cross_contaminated_between_orders(self, fresh_db, pickup_order, dropship_order):
+        db.upsert_order(pickup_order)
+        db.upsert_order(dropship_order)
+        db.seed_default_destination("/tmp/hotfolder")
+        dest = db.get_default_destination()
+
+        pickup = db.get_order("GS1777844776")
+        db.insert_order_item(pickup["id"], "a.jpg", "8x24", dest["id"])
+
+        result = {o["order_num"]: o["items"] for o in db.get_queue()}
+        assert len(result["GS1777844776"]) == 1
+        assert result["AD1779691289"] == []
+
 
 # ── get_history ───────────────────────────────────────────────────────────────
 

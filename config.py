@@ -27,6 +27,7 @@ DEFAULTS = {
     "samples_folder": "",
     "fulfillment_mode": "pickup",   # "pickup" | "dropship" | "both"
     "print_mode": "auto",           # "auto" | "manual"
+    "destination_health_threshold": 10,  # minutes before a destination is flagged stale
 }
 
 

@@ -56,6 +56,8 @@ def create_app(poller, ui_path: str) -> Flask:
     poller.on_error         = lambda err:        (push_event("poll_error", {"error": err}), _log(f"Poll error: {err}", "error"))
     poller.on_download_done = lambda num, ok, e: (push_event("download_done", {"order_num": num, "ok": ok, "error": e}),
                                                   _log(f"Download {'complete' if ok else 'failed'}: {num}" + (f" — {e}" if not ok else "")))
+    poller.on_order_ready   = lambda num: (push_event("order_state_change", {"order_num": num, "status": "ready"}),
+                                           _log(f"✅ Order {num} ready for pickup"))
 
     # ── Frontend ──────────────────────────────────────────────────────────────
 

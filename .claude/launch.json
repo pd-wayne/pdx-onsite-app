@@ -5,7 +5,7 @@
       "name": "pdx-onsite",
       "runtimeExecutable": "python3",
       "runtimeArgs": ["/Users/gdub-photoday/Desktop/Wayne's Projects/pdx_onsite_app/main.py"],
-      "port": 5000
+      "port": 5050
     }
   ]
 }

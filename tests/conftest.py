@@ -100,6 +100,7 @@ class MockPoller:
         self.on_poll_complete = None
         self.on_error = None
         self.on_download_done = None
+        self.on_order_ready = None
 
     def configure(self, lab_id, api_key, interval):
         pass

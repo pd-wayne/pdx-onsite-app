@@ -17,7 +17,7 @@ log = logging.getLogger("pdx.poller")
 
 
 class Poller:
-    def __init__(self, on_new_orders=None, on_poll_complete=None, on_error=None, on_download_done=None):
+    def __init__(self, on_new_orders=None, on_poll_complete=None, on_error=None, on_download_done=None, on_order_ready=None):
         self._thread = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
@@ -26,6 +26,7 @@ class Poller:
         self.on_poll_complete = on_poll_complete
         self.on_error         = on_error
         self.on_download_done = on_download_done
+        self.on_order_ready   = on_order_ready
 
         self.lab_id = ""
         self.api_key = ""
@@ -244,6 +245,8 @@ class Poller:
             db.set_download_status(order_num, "ok")
             if order_id is not None and db.check_order_ready(order_num):
                 log.info(f"[Download] {order_num} → ready for pickup")
+                if self.on_order_ready:
+                    self.on_order_ready(order_num)
         else:
             db.set_download_status(order_num, "failed", overall_err)
 

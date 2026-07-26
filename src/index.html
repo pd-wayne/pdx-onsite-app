@@ -82,6 +82,12 @@
             <span class="panel-sub" id="queue-sub"></span>
           </div>
         </div>
+        <div id="queue-toolbar" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 12px">
+          <div id="queue-dest-health" class="dest-health-strip"></div>
+          <label id="queue-dropship-toggle" class="dropship-toggle" style="display:none">
+            <input type="checkbox" id="dropship-toggle-input" onchange="onDropshipToggle()"> Show dropship orders
+          </label>
+        </div>
         <div class="history-table-wrap" id="queue-table-wrap">
           <table class="history-table" id="queue-table">
             <thead><tr>
@@ -303,6 +309,8 @@
     </div>
     <div class="detail-section-label">Items</div>
     <div id="detail-items"></div>
+    <div class="detail-section-label" id="detail-routing-label" style="display:none">Print Routing</div>
+    <div class="spec-chip-row" id="detail-routing"></div>
     <div class="detail-section-label">Images</div>
     <div class="detail-images" id="detail-images"></div>
   </div>

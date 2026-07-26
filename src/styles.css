@@ -53,6 +53,7 @@ body{display:flex;flex-direction:column}
 .status-dot.green{background:var(--green);box-shadow:0 0 10px rgba(14,203,129,.5)}
 .status-dot.red{background:var(--red)}
 .status-dot.amber{background:var(--amber);box-shadow:0 0 8px rgba(245,166,35,.4)}
+.status-dot.gray{background:var(--text3)}
 #status-counts{margin-left:auto;display:flex;gap:8px;align-items:center}
 .count-chip{
   font-size:11px;font-weight:600;padding:4px 11px;border-radius:20px;
@@ -210,6 +211,31 @@ body{display:flex;flex-direction:column}
 .status-pill.pending{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245,166,35,.2)}
 .status-pill.fulfilled{background:rgba(79,142,247,.1);color:var(--accent);border:1px solid rgba(79,142,247,.2)}
 .status-pill.confirmed{background:var(--green-bg);color:var(--green);border:1px solid rgba(14,203,129,.2)}
+.status-pill.ready{background:var(--green-bg);color:var(--green);border:1px solid rgba(14,203,129,.2)}
+.status-pill.printing{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245,166,35,.2)}
+
+/* ── Per-item spec chips ────────────────────────────────────────────────── */
+.spec-chip-row{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+.spec-chip{
+  display:inline-flex;align-items:center;gap:4px;
+  font-size:9px;font-weight:600;padding:2px 7px;border-radius:10px;
+  background:var(--bg3);border:1px solid var(--border);color:var(--text2);
+}
+.spec-chip-dot{width:5px;height:5px;border-radius:50%;background:var(--text3);flex-shrink:0}
+.spec-chip.queued .spec-chip-dot{background:var(--amber)}
+.spec-chip.printed{color:var(--green);border-color:rgba(14,203,129,.2)}
+.spec-chip.printed .spec-chip-dot{background:var(--green)}
+.spec-chip.error{color:var(--red);border-color:rgba(240,82,82,.2)}
+.spec-chip.error .spec-chip-dot{background:var(--red)}
+
+/* ── Destination health strip (Live Queue) ─────────────────────────────── */
+.dest-health-strip{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--text2)}
+.dest-health-count{font-weight:700;color:var(--text);margin-right:2px}
+.dest-health-dot{display:inline-flex;align-items:center;gap:5px}
+
+/* ── Dropship toggle (Live Queue) ───────────────────────────────────────── */
+.dropship-toggle{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text2);cursor:pointer;user-select:none}
+.dropship-toggle input{cursor:pointer}
 
 /* ── Empty state ────────────────────────────────────────────────────────── */
 .empty-state{
@@ -362,6 +388,7 @@ body{display:flex;flex-direction:column}
 .detail-status-badge.pending{background:var(--bg3);color:var(--text3);border:1px solid var(--border)}
 .detail-status-badge.fulfilled{background:var(--green-bg);color:var(--green);border:1px solid rgba(14,203,129,.2)}
 .detail-status-badge.confirmed{background:rgba(79,142,247,.1);color:var(--accent);border:1px solid rgba(79,142,247,.2)}
+.detail-status-badge.ready{background:var(--green-bg);color:var(--green);border:1px solid rgba(14,203,129,.2)}
 .btn-action{
   width:100%;padding:11px;font-size:13px;font-weight:700;font-family:var(--font);
   border:none;border-radius:var(--radius);cursor:pointer;transition:all var(--transition);

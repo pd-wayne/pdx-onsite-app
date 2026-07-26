@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 import sys
+from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
@@ -284,7 +285,45 @@ def get_order(order_num: str) -> Optional[dict]:
         row = conn.execute(
             "SELECT * FROM orders WHERE order_num = ?", (order_num,)
         ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        order = dict(row)
+        order["items"] = _get_items_by_order_id(conn, order["id"])
+        return order
+
+
+def _get_items_by_order_id(conn, order_id: int) -> list:
+    items = conn.execute("""
+        SELECT oi.id, oi.filename, oi.print_spec, oi.destination_id,
+               oi.status, oi.printed_at, d.name AS destination_name
+        FROM order_items oi
+        LEFT JOIN destinations d ON oi.destination_id = d.id
+        WHERE oi.order_id = ?
+        ORDER BY oi.id ASC
+    """, (order_id,)).fetchall()
+    return [dict(i) for i in items]
+
+
+def _attach_items(conn, orders: list) -> list:
+    """Batch-attach order_items to a list of order dicts (avoids N+1 queries)."""
+    if not orders:
+        return orders
+    ids = [o["id"] for o in orders]
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(f"""
+        SELECT oi.id, oi.order_id, oi.filename, oi.print_spec, oi.destination_id,
+               oi.status, oi.printed_at, d.name AS destination_name
+        FROM order_items oi
+        LEFT JOIN destinations d ON oi.destination_id = d.id
+        WHERE oi.order_id IN ({placeholders})
+        ORDER BY oi.id ASC
+    """, ids).fetchall()
+    by_order = defaultdict(list)
+    for r in rows:
+        by_order[r["order_id"]].append(dict(r))
+    for o in orders:
+        o["items"] = by_order.get(o["id"], [])
+    return orders
 
 
 def get_queue(gallery_filter: Optional[str] = None) -> list:
@@ -300,7 +339,7 @@ def get_queue(gallery_filter: Optional[str] = None) -> list:
                 SELECT * FROM orders WHERE status IN ('received', 'ready')
                 ORDER BY received_at ASC
             """).fetchall()
-        return [dict(r) for r in rows]
+        return _attach_items(conn, [dict(r) for r in rows])
 
 
 def get_history(gallery_filter: Optional[str] = None, limit: int = 500) -> list:
@@ -673,15 +712,7 @@ def get_order_items(order_num: str) -> list:
         ).fetchone()
         if not row:
             return []
-        items = conn.execute("""
-            SELECT oi.id, oi.filename, oi.print_spec, oi.destination_id,
-                   oi.status, oi.printed_at, d.name AS destination_name
-            FROM order_items oi
-            LEFT JOIN destinations d ON oi.destination_id = d.id
-            WHERE oi.order_id = ?
-            ORDER BY oi.id ASC
-        """, (row["id"],)).fetchall()
-        return [dict(i) for i in items]
+        return _get_items_by_order_id(conn, row["id"])
 
 
 def check_order_ready(order_num: str) -> bool:

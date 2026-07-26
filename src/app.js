@@ -18,6 +18,7 @@ const state = {
   queueSortAsc: false,
   destinations: [],
   routing: [],
+  destination_health_threshold: 10,
 };
 
 // ── API helpers ────────────────────────────────────────────────────────────
@@ -47,6 +48,7 @@ function initSSE() {
       else if (event === "update_progress") handleUpdateProgress(data);
       else if (event === "update_error") { toast(`Update failed: ${data.error}`, "error"); hideUpdateProgress(); }
       else if (event === "order_confirmed" || event === "order_fulfilled") { refreshAll(); if (state.selectedOrder?.order_num === data.order_num) openDetail(data.order_num); }
+      else if (event === "order_state_change") { refreshQueue(); if (state.selectedOrder?.order_num === data.order_num) openDetail(data.order_num); }
       else if (event === "jobs_updated") { refreshJobs(); }
       else if (event === "job_history_done") {
         if (data.gallery === state.galleryFilter) {
@@ -231,6 +233,62 @@ function toggleQueueSort() {
   renderQueue();
 }
 
+function currentJob() {
+  return state.jobs.find(j => j.gallery === state.galleryFilter);
+}
+
+function computeDestinationHealth() {
+  const now = Date.now();
+  const thresholdMs = (state.destination_health_threshold || 10) * 60000;
+  const queuedByDest = {};
+  state.queue.forEach(o => (o.items || []).forEach(it => {
+    if (it.status === "queued") queuedByDest[it.destination_id] = (queuedByDest[it.destination_id] || 0) + 1;
+  }));
+  return (state.destinations || []).filter(d => d.active).map(d => {
+    const hasQueued = !!queuedByDest[d.id];
+    const lastMs = d.last_success_at ? new Date(d.last_success_at).getTime() : null;
+    const stale = hasQueued && (!lastMs || (now - lastMs) > thresholdMs);
+    return { ...d, hasQueued, stale, queuedCount: queuedByDest[d.id] || 0 };
+  });
+}
+
+function renderDestinationHealthStrip() {
+  const el = document.getElementById("queue-dest-health");
+  if (!el) return;
+  const health = computeDestinationHealth();
+  if (!health.length) { el.innerHTML = ""; return; }
+  const dots = health.map(d => {
+    const cls = d.stale ? "amber" : d.hasQueued ? "green" : "gray";
+    const title = d.stale
+      ? `${d.name}: ${d.queuedCount} queued, no recent activity`
+      : d.hasQueued ? `${d.name}: ${d.queuedCount} queued, printing normally` : `${d.name}: idle`;
+    return `<span class="dest-health-dot" title="${esc(title)}"><span class="status-dot ${cls}"></span>${esc(d.name)}</span>`;
+  }).join("");
+  el.innerHTML = `<span class="dest-health-count">${health.length} destination${health.length===1?"":"s"}</span>${dots}`;
+}
+
+function renderDropshipToggle() {
+  const wrap = document.getElementById("queue-dropship-toggle");
+  const input = document.getElementById("dropship-toggle-input");
+  if (!wrap || !input) return;
+  const job = currentJob();
+  if (job && job.fulfillment_mode === "onsite") {
+    wrap.style.display = "flex";
+    input.checked = !!job.show_dropship;
+  } else {
+    wrap.style.display = "none";
+  }
+}
+
+async function onDropshipToggle() {
+  const job = currentJob();
+  if (!job) return;
+  const checked = document.getElementById("dropship-toggle-input").checked;
+  job.show_dropship = checked;
+  await apiPost("update_job_mode", { gallery: job.gallery, mode: job.fulfillment_mode, show_dropship: checked });
+  renderQueue();
+}
+
 function renderQueue() {
   const noJob  = document.getElementById("queue-no-job");
   const content = document.getElementById("queue-content");
@@ -244,23 +302,32 @@ function renderQueue() {
     content.style.display = "block";
   }
 
+  renderDestinationHealthStrip();
+  renderDropshipToggle();
+
   const tbody = document.getElementById("queue-tbody");
   const threshold = state.unclaimed_threshold;
   const now = Date.now();
   const filter = state.queueFilter;
+  const job = currentJob();
+  const hideDropship = job && job.fulfillment_mode === "onsite" && !job.show_dropship;
+
+  const liveQueue = hideDropship
+    ? state.queue.filter(o => o.fulfillment_mode !== "dropship")
+    : state.queue;
 
   let rows = [];
   if (filter === "all") {
     rows = [
-      ...state.queue.map(o => ({ ...o, _type: "pending" })),
+      ...liveQueue.map(o => ({ ...o, _type: "pending" })),
       ...state.history.map(o => ({ ...o, _type: "fulfilled" }))
     ];
   } else if (filter === "pending") {
-    rows = state.queue.map(o => ({ ...o, _type: "pending" }));
+    rows = liveQueue.map(o => ({ ...o, _type: "pending" }));
   } else if (filter === "completed") {
     rows = state.history.map(o => ({ ...o, _type: "fulfilled" }));
   } else if (filter === "needs_attention") {
-    rows = state.queue
+    rows = liveQueue
       .filter(o => (now - new Date(o.received_at).getTime()) / 60000 >= threshold)
       .map(o => ({ ...o, _type: "pending" }));
   }
@@ -271,7 +338,7 @@ function renderQueue() {
     return state.queueSortAsc ? ta - tb : tb - ta;
   });
 
-  const pendingRows = state.queue;
+  const pendingRows = liveQueue;
   if (pendingRows.length) {
     const avgMin = pendingRows.reduce((sum, o) => sum + (now - new Date(o.received_at).getTime()) / 60000, 0) / pendingRows.length;
     document.getElementById("avg-wait-display").textContent = `Avg wait: ${formatAge(avgMin)}`;
@@ -279,8 +346,8 @@ function renderQueue() {
     document.getElementById("avg-wait-display").textContent = "";
   }
 
-  const pendingCount = state.queue.length;
-  const unclaimed = state.queue.filter(o => (now - new Date(o.received_at).getTime()) / 60000 >= threshold).length;
+  const pendingCount = liveQueue.length;
+  const unclaimed = liveQueue.filter(o => (now - new Date(o.received_at).getTime()) / 60000 >= threshold).length;
   updateBadge("badge-queue", pendingCount, unclaimed > 0);
   document.getElementById("queue-sub").textContent = `${rows.length} order(s)`;
 
@@ -299,9 +366,22 @@ function renderQueue() {
     const items = parseItems(o.items_json);
     const itemStr = items.map(it => `${it.files||it.qty}× ${esc(it.desc||it.sku)}`).join(", ") || "—";
 
+    const orderItems = o.items || [];
+    const itemsTotal = orderItems.length;
+    const itemsPrinted = orderItems.filter(it => it.status === "printed").length;
+    const specChips = orderItems.length
+      ? `<div class="spec-chip-row">${orderItems.map(it =>
+          `<span class="spec-chip ${it.status}" title="${esc(it.destination_name || 'Unassigned')}">${esc(it.print_spec || "—")}<span class="spec-chip-dot"></span></span>`
+        ).join("")}</div>`
+      : "";
+
     let statusHtml = "";
     if (o._type === "fulfilled") {
       statusHtml = `<span class="status-pill confirmed">✓ Completed</span>`;
+    } else if (o.status === "ready") {
+      statusHtml = `<span class="status-pill ready">✅ Ready for pickup</span>`;
+    } else if (itemsTotal > 0 && itemsPrinted < itemsTotal) {
+      statusHtml = `<span class="status-pill printing">🖨 ${itemsPrinted} of ${itemsTotal} printed</span>`;
     } else if (o.fulfill_status === "fulfilled") {
       statusHtml = `<span class="status-pill fulfilled">🖨 Printed</span>`;
     } else if (isAlert) {
@@ -329,7 +409,7 @@ function renderQueue() {
       <td class="td-mono" style="font-size:10px">${esc(o.order_num)}</td>
       <td class="td-bold" style="font-size:12px">${esc(o.customer_name)}</td>
       <td style="font-size:11px;color:var(--text3);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(o.gallery||"—")}</td>
-      <td style="font-size:11px">${esc(itemStr)} ${dlIcon}</td>
+      <td style="font-size:11px">${esc(itemStr)} ${dlIcon}${specChips}</td>
       <td class="td-mono" style="font-size:10px;color:var(--text3)">${formatTime(o.received_at)}</td>
       <td style="font-size:11px">${waitStr}</td>
       <td>${statusHtml}</td>
@@ -355,6 +435,8 @@ async function openDetail(orderNum) {
   const badge = document.getElementById("detail-status-badge");
   if (order.status === "fulfilled") {
     badge.className = "detail-status-badge confirmed"; badge.textContent = "✅ Completed";
+  } else if (order.status === "ready") {
+    badge.className = "detail-status-badge ready"; badge.textContent = "✅ Ready for pickup";
   } else if (order.fulfill_status === "fulfilled") {
     badge.className = "detail-status-badge fulfilled"; badge.textContent = "🖨 Printed — Awaiting Scan";
   } else {
@@ -374,6 +456,18 @@ async function openDetail(orderNum) {
       <span style="color:var(--text)">${esc(it.desc||it.sku)}</span>
     </div>`
   ).join("") || "<div style='color:var(--text3);font-size:12px'>No items</div>";
+
+  const routingLabel = document.getElementById("detail-routing-label");
+  const routing = order.items || [];
+  if (routing.length) {
+    routingLabel.style.display = "block";
+    document.getElementById("detail-routing").innerHTML = routing.map(it =>
+      `<span class="spec-chip ${it.status}" title="${esc(it.destination_name || 'Unassigned')}">${esc(it.print_spec || "—")}<span class="spec-chip-dot"></span></span>`
+    ).join("");
+  } else {
+    routingLabel.style.display = "none";
+    document.getElementById("detail-routing").innerHTML = "";
+  }
 
   state.selectedImages = new Set();
   renderDetailImages(order);
@@ -731,6 +825,7 @@ async function loadSettings() {
     document.getElementById("s-image-folder").value = cfg.image_output_folder || "";
     document.getElementById("s-samples-folder").value = cfg.samples_folder || "";
     state.unclaimed_threshold = parseInt(cfg.unclaimed_threshold) || 30;
+    state.destination_health_threshold = parseInt(cfg.destination_health_threshold) || 10;
     if (cfg.samples_folder) state.samplesFolder = cfg.samples_folder;
     loadPrinters(cfg.printer_name || "").catch(() => {
       document.getElementById("s-printer-name").innerHTML = '<option value="">Could not detect — enter manually</option>';
@@ -893,7 +988,7 @@ function toggleLog() {
 
 // ── Refresh All ────────────────────────────────────────────────────────────
 async function refreshAll() {
-  await Promise.all([refreshQueue(), refreshHistory(), refreshStats(), refreshGalleries(), refreshJobs()]);
+  await Promise.all([refreshQueue(), refreshHistory(), refreshStats(), refreshGalleries(), refreshJobs(), loadDestinations()]);
   renderQueue();
 }
 
@@ -1181,6 +1276,7 @@ async function init() {
       showPanel("settings", document.querySelector(".nav-item[onclick*=\"'settings'\"]"));
     }
     updateHotFolderWarning(cfg.image_output_folder);
+    state.destination_health_threshold = parseInt(cfg.destination_health_threshold) || 10;
     if (cfg.logo_path) loadLogoPreview();
   } catch(e) {}
   try {
