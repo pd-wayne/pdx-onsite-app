@@ -115,10 +115,10 @@ function renderJobDropdown(query = "") {
     const isStudio = j.fulfillment_mode === "in_studio";
     const modeLabel = isStudio ? "studio" : "onsite";
     return `
-    <div class="job-option${state.galleryFilter === j.gallery ? " selected" : ""}" onclick="selectJob(${JSON.stringify(j.gallery)})">
+    <div class="job-option${state.galleryFilter === j.gallery ? " selected" : ""}" onclick="selectJob(${esc(JSON.stringify(j.gallery))})">
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(j.gallery)}</span>
       <span style="display:flex;align-items:center;gap:5px;flex-shrink:0">
-        <span class="mode-chip ${modeLabel}" title="Click to toggle mode" onclick="event.stopPropagation();toggleJobMode(${JSON.stringify(j.gallery)}, '${j.fulfillment_mode}')">${modeLabel}</span>
+        <span class="mode-chip ${modeLabel}" title="Click to toggle mode" onclick="event.stopPropagation();toggleJobMode(${esc(JSON.stringify(j.gallery))}, '${j.fulfillment_mode}')">${modeLabel}</span>
         <span style="color:var(--text3);font-size:10px">${j.order_count}</span>
       </span>
     </div>`;
