@@ -351,7 +351,8 @@ def _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
                 qty_str = f"x{qty}"
                 desc = it.get("desc") or it.get("sku") or ""
                 desc = fit_text(desc, f_bold, pw - pad * 2 - tw(qty_str, f_bold) - 20)
-                two_col(desc, qty_str, y, val_font=f_bold)
+                draw.text((pad, y), desc, fill="black", font=f_bold)
+                draw.text((pw - pad - tw(qty_str, f_bold), y), qty_str, fill="black", font=f_bold)
                 y += lh_body
                 fnames = images_by_idx.get(i) or images_by_sku.get(it.get("sku", ""), [])
                 for fname in fnames:
