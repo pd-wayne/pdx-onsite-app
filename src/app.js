@@ -310,6 +310,7 @@ function renderQueue() {
   }
 
   renderDestinationHealthStrip();
+  renderDestinations();
   renderDropshipToggle();
   renderPrintAllSlipsButton();
 
@@ -903,10 +904,12 @@ async function loadSettings() {
     document.getElementById("s-print-mode").value = cfg.print_mode || "auto";
     document.getElementById("s-poll-interval").value = String(cfg.poll_interval || 60);
     document.getElementById("s-unclaimed-threshold").value = String(cfg.unclaimed_threshold || 30);
+    document.getElementById("s-destination-health-threshold").value = String(cfg.destination_health_threshold || 10);
     document.getElementById("s-image-folder").value = cfg.image_output_folder || "";
     document.getElementById("s-samples-folder").value = cfg.samples_folder || "";
     state.unclaimed_threshold = parseInt(cfg.unclaimed_threshold) || 30;
     state.destination_health_threshold = parseInt(cfg.destination_health_threshold) || 10;
+    renderDestinations();
     if (cfg.samples_folder) state.samplesFolder = cfg.samples_folder;
     loadPrinters(cfg.printer_name || "").catch(() => {
       document.getElementById("s-printer-name").innerHTML = '<option value="">Could not detect — enter manually</option>';
@@ -940,6 +943,7 @@ async function saveSettings() {
     fulfillment_mode:     document.getElementById("s-fulfillment-mode").value,
     poll_interval:        parseInt(document.getElementById("s-poll-interval").value),
     unclaimed_threshold:  parseInt(document.getElementById("s-unclaimed-threshold").value),
+    destination_health_threshold: parseInt(document.getElementById("s-destination-health-threshold").value),
     printer_name:         printerManual || printerSel,
     print_mode:           document.getElementById("s-print-mode").value,
     image_output_folder:  document.getElementById("s-image-folder").value.trim(),
@@ -949,8 +953,11 @@ async function saveSettings() {
   const result = await apiPost("save_settings", cfg);
   if (result.ok) {
     state.unclaimed_threshold = cfg.unclaimed_threshold;
+    state.destination_health_threshold = cfg.destination_health_threshold;
     if (cfg.samples_folder) state.samplesFolder = cfg.samples_folder;
     updateHotFolderWarning(cfg.image_output_folder);
+    renderDestinations();
+    renderDestinationHealthStrip();
     const msg = document.getElementById("settings-save-msg");
     msg.classList.add("show"); setTimeout(() => msg.classList.remove("show"), 2200);
     toast("Settings saved", "success");
@@ -1221,8 +1228,18 @@ function renderDestinations() {
     list.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:6px 0">No destinations yet. Add one above.</div>`;
     return;
   }
-  list.innerHTML = dests.map(d => `
+  const healthById = {};
+  computeDestinationHealth().forEach(h => { healthById[h.id] = h; });
+
+  list.innerHTML = dests.map(d => {
+    const h = healthById[d.id];
+    const cls = !d.active ? "gray" : h?.stale ? "amber" : h?.hasQueued ? "green" : "gray";
+    const title = !d.active ? "Inactive"
+      : h?.stale ? `${h.queuedCount} queued, no recent activity`
+      : h?.hasQueued ? `${h.queuedCount} queued, printing normally` : "Idle";
+    return `
     <div class="dest-row" id="dest-row-${d.id}">
+      <span class="status-dot ${cls}" title="${esc(title)}" style="flex-shrink:0"></span>
       <input class="form-input" style="width:130px;flex-shrink:0" id="dest-name-${d.id}" value="${esc(d.name)}" placeholder="Name">
       <input class="form-input mono" style="flex:1;min-width:0" id="dest-path-${d.id}" value="${esc(d.hot_folder_path)}" placeholder="C:\\Hot Folder\\Path">
       <button class="btn-xs btn-xs-ghost" onclick="browseDestFolder(${d.id})">…</button>
@@ -1231,7 +1248,8 @@ function renderDestinations() {
       </label>
       <button class="btn-xs btn-xs-blue" onclick="saveDestination(${d.id})">Save</button>
       <button class="btn-xs btn-xs-ghost dest-delete" onclick="deleteDestination(${d.id})">✕</button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 
 function addDestination() {

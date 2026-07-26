@@ -209,6 +209,16 @@
             </div>
             <div id="destinations-list"></div>
             <div class="form-hint" style="margin-top:6px">Each destination is a hot folder. Mark one as default — it catches any product not explicitly routed.</div>
+            <div class="form-row" style="margin-top:14px">
+              <label class="form-label">Flag destination as stale after</label>
+              <select class="form-select" id="s-destination-health-threshold" style="width:auto">
+                <option value="5">5 minutes</option>
+                <option value="10" selected>10 minutes</option>
+                <option value="15">15 minutes</option>
+                <option value="30">30 minutes</option>
+              </select>
+              <div class="form-hint">Visual only — a destination is flagged when it has queued items and hasn't printed successfully within this window. Nothing is blocked.</div>
+            </div>
           </div>
 
           <div class="settings-section">
