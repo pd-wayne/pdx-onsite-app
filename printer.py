@@ -679,10 +679,14 @@ def get_image_path(filename: str, output_folder: str, order_num: str = "") -> Op
 
 # ── Packing slip (in-studio) ────────────────────────────────────────────────
 
-def locate_downloaded_image(filename: str, destinations: list, order_num: str = "") -> Optional[str]:
+def locate_downloaded_image(filename: str, destinations: list, order_num: str = "",
+                            image_output_folder: str = "") -> Optional[str]:
     """Locate an image across every active destination's hot folder (and its
     archive) — same lookup `get_image_path` does for a single folder, generalized
-    across the multi-destination routing system."""
+    across the multi-destination routing system. Also checks the dropship/
+    folder: bulk orders (non-empty groups[]) are commonly dropship-classified —
+    confirmed against two real PDX samples — and dropship images never land in
+    a routed destination, only dropship/ORDER_NUM/."""
     for dest in destinations:
         folder = dest.get("hot_folder_path", "")
         if not dest.get("active", True) or not folder:
@@ -690,6 +694,10 @@ def locate_downloaded_image(filename: str, destinations: list, order_num: str = 
         path = get_image_path(filename, folder, order_num)
         if path:
             return path
+    if image_output_folder and order_num:
+        dropship_path = os.path.join(get_order_dropship_path(image_output_folder, order_num), filename)
+        if os.path.exists(dropship_path):
+            return dropship_path
     return None
 
 
@@ -859,7 +867,8 @@ def _render_packing_slip_pages(order_num: str, header_block: dict, items: list, 
     return pages
 
 
-def build_packing_slip_pages(order: dict, destinations: list, studio_name: str = "") -> list:
+def build_packing_slip_pages(order: dict, destinations: list, studio_name: str = "",
+                             image_output_folder: str = "") -> list:
     """
     Build the packing-slip page images for one order. Bulk/roster orders (signaled
     by a non-empty groups[] in the raw PDX payload — isBulkOrder isn't a reliable
@@ -869,6 +878,10 @@ def build_packing_slip_pages(order: dict, destinations: list, studio_name: str =
     info. Standard orders get a single slip section. Returns a flat list of RGB
     pages — concatenate across orders and pass to build_packing_slips_pdf() for
     one combined multi-page PDF (one print dialog for a whole batch).
+
+    image_output_folder lets thumbnails resolve for dropship-classified orders
+    (bulk orders commonly are, per two real samples) whose images live in
+    dropship/ORDER_NUM/ rather than a routed destination.
     """
     order_num = order.get("order_num", "")
     gallery   = order.get("gallery", "")
@@ -882,7 +895,7 @@ def build_packing_slip_pages(order: dict, destinations: list, studio_name: str =
 
     parsed_items = _parse_packing_slip_items(order)
     thumb_paths = {
-        it["filename"]: locate_downloaded_image(it["filename"], destinations, order_num)
+        it["filename"]: locate_downloaded_image(it["filename"], destinations, order_num, image_output_folder)
         for it in parsed_items if it.get("filename")
     }
 
@@ -928,14 +941,15 @@ def build_packing_slip_pages(order: dict, destinations: list, studio_name: str =
     )
 
 
-def build_packing_slips_pdf(orders: list, destinations: list, studio_name: str = "") -> bytes:
+def build_packing_slips_pdf(orders: list, destinations: list, studio_name: str = "",
+                            image_output_folder: str = "") -> bytes:
     """Build one combined multi-page PDF across one or more orders — a single
     print dialog covers the whole batch, whether it's one slip or fifty."""
     from PIL import Image
 
     all_pages = []
     for order in orders:
-        all_pages.extend(build_packing_slip_pages(order, destinations, studio_name))
+        all_pages.extend(build_packing_slip_pages(order, destinations, studio_name, image_output_folder))
 
     if not all_pages:
         blank_w = int(PACKING_SLIP_PAGE_W_IN * PACKING_SLIP_DPI)

@@ -416,7 +416,9 @@ def create_app(poller, ui_path: str) -> Flask:
 
         cfg = config.load()
         destinations = db.get_destinations()
-        pdf_bytes = printer.build_packing_slips_pdf(orders, destinations, cfg.get("studio_name", ""))
+        pdf_bytes = printer.build_packing_slips_pdf(
+            orders, destinations, cfg.get("studio_name", ""), cfg.get("image_output_folder", "")
+        )
         return Response(pdf_bytes, mimetype="application/pdf")
 
     @app.route("/api/mark_slips_printed", methods=["POST"])

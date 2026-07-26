@@ -78,6 +78,34 @@ class TestLocateDownloadedImage:
     def test_empty_destinations_returns_none(self):
         assert printer.locate_downloaded_image("photo.jpg", []) is None
 
+    def test_falls_back_to_dropship_folder(self, tmp_path):
+        # Bulk orders are commonly dropship-classified (confirmed against two real
+        # PDX samples) — their images live in dropship/ORDER_NUM/, never a routed
+        # destination, so packing-slip thumbnails must check there too.
+        dropship_dir = tmp_path / "Hot" / "dropship" / "ORD001"
+        dropship_dir.mkdir(parents=True)
+        (dropship_dir / "photo.jpg").write_bytes(b"fake")
+        path = printer.locate_downloaded_image(
+            "photo.jpg", [], order_num="ORD001", image_output_folder=str(tmp_path / "Hot")
+        )
+        assert path == str(dropship_dir / "photo.jpg")
+
+    def test_destinations_checked_before_dropship_folder(self, tmp_path):
+        dest = tmp_path / "Dest"
+        dest.mkdir()
+        (dest / "photo.jpg").write_bytes(b"real-destination-copy")
+        dropship_dir = tmp_path / "Hot" / "dropship" / "ORD001"
+        dropship_dir.mkdir(parents=True)
+        (dropship_dir / "photo.jpg").write_bytes(b"dropship-copy")
+        destinations = [{"hot_folder_path": str(dest), "active": True}]
+        path = printer.locate_downloaded_image(
+            "photo.jpg", destinations, order_num="ORD001", image_output_folder=str(tmp_path / "Hot")
+        )
+        assert path == str(dest / "photo.jpg")
+
+    def test_no_image_output_folder_skips_dropship_fallback(self, tmp_path):
+        assert printer.locate_downloaded_image("photo.jpg", [], order_num="ORD001") is None
+
 
 # ── _raw_items_to_slip_rows / _group_label_and_display_fields ─────────────────────
 # Confirmed against a live PDX bulk order sample: groups[] entries carry only

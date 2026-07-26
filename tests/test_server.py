@@ -7,6 +7,7 @@ Every test gets a fresh DB via the `client` fixture in conftest.py.
 import io
 import json
 import pytest
+import config
 import db
 
 
@@ -323,6 +324,25 @@ class TestPackingSlip:
         assert resp.status_code == 200
         assert resp.content_type == "application/pdf"
         assert resp.data[:4] == b"%PDF"
+
+    def test_packing_slip_pdf_passes_image_output_folder_for_dropship_thumbnails(self, client, pickup_order, monkeypatch):
+        # Bulk orders are commonly dropship-classified — their thumbnails live in
+        # dropship/ORDER_NUM/, resolved via image_output_folder. Confirm the
+        # endpoint actually threads it through rather than leaving it blank.
+        import printer
+        db.upsert_order(pickup_order)
+        config.save({"image_output_folder": "C:\\Hot\\Folder"})
+        captured = {}
+        real_build = printer.build_packing_slips_pdf
+        def spy(orders, destinations, studio_name="", image_output_folder=""):
+            captured["image_output_folder"] = image_output_folder
+            return real_build(orders, destinations, studio_name, image_output_folder)
+        monkeypatch.setattr(printer, "build_packing_slips_pdf", spy)
+
+        client.post("/api/packing_slip_pdf",
+                   data=json.dumps({"order_nums": [pickup_order["num"]]}),
+                   content_type="application/json")
+        assert captured["image_output_folder"] == "C:\\Hot\\Folder"
 
     def test_packing_slip_pdf_combines_multiple_orders(self, client, pickup_order, dropship_order):
         db.upsert_order(pickup_order)
