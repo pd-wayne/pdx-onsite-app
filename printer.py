@@ -72,9 +72,10 @@ def _fmt_dt(iso_str: str) -> str:
 
 def _parse_order_data(order: dict):
     """Extract and parse all fields needed for receipt printing."""
-    order_num = order.get("order_num", "")
-    customer  = order.get("customer_name", "Unknown")
-    placed_at = order.get("placed_at", "")
+    order_num      = order.get("order_num", "")
+    customer       = order.get("customer_name", "Unknown")
+    customer_phone = order.get("customer_phone", "")
+    placed_at      = order.get("placed_at", "")
     try:
         items = json.loads(order.get("items_json", "[]"))
     except Exception:
@@ -91,17 +92,12 @@ def _parse_order_data(order: dict):
                 images_by_idx.setdefault(idx, []).append(fname)
     except Exception:
         pass
-    return order_num, customer, placed_at, items, images_by_idx, images_by_sku
+    return order_num, customer, customer_phone, placed_at, items, images_by_idx, images_by_sku
 
 
-def _print_receipt_gdi(order_num, customer, placed_at, items, images_by_idx,
-                       images_by_sku, printer_name, studio_name) -> tuple[bool, str]:
-    """
-    Print receipt using Windows GDI + PIL.
-    Renders the entire receipt (text + QR) as a raster PIL image, then sends
-    it to the printer via ImageWin.Dib. Bypasses ESC/POS entirely so it works
-    with any Windows printer driver regardless of byte-stripping behaviour.
-    """
+def _print_receipt_gdi_v1(order_num, customer, placed_at, items, images_by_idx,
+                          images_by_sku, printer_name, studio_name) -> tuple[bool, str]:
+    """Legacy GDI receipt layout — kept as reversion fallback. Do not delete."""
     try:
         import win32ui
         import qrcode
@@ -211,6 +207,198 @@ def _print_receipt_gdi(order_num, customer, placed_at, items, images_by_idx,
         return False, str(e)
 
 
+def _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
+                       images_by_idx, images_by_sku, printer_name, studio_name) -> tuple[bool, str]:
+    """
+    Print receipt using Windows GDI + PIL.
+    Two-column label/value layout, dashed order-number box, Arial Bold fonts.
+    Renders the full receipt as a raster image and sends via ImageWin.Dib —
+    bypasses ESC/POS entirely so it works with any Windows printer driver.
+    """
+    try:
+        import win32ui
+        import qrcode
+        from PIL import Image, ImageDraw, ImageFont, ImageWin
+
+        # ── Probe printer DPI and printable width ─────────────────────────────
+        hdc_probe = win32ui.CreateDC()
+        hdc_probe.CreatePrinterDC(printer_name)
+        dpi_x = hdc_probe.GetDeviceCaps(88)
+        dpi_y = hdc_probe.GetDeviceCaps(90)
+        pw    = hdc_probe.GetDeviceCaps(8)
+        hdc_probe.DeleteDC()
+
+        pad = max(10, int(pw * 0.05))
+
+        def _pt(points):
+            return max(10, int(dpi_y * points / 72))
+
+        try:
+            f_large = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _pt(12))
+            f_body  = ImageFont.truetype("C:/Windows/Fonts/arial.ttf",   _pt(8))
+            f_bold  = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _pt(8))
+            f_small = ImageFont.truetype("C:/Windows/Fonts/arial.ttf",   _pt(7))
+        except Exception:
+            f_large = f_body = f_bold = f_small = ImageFont.load_default()
+
+        lh_large = int(_pt(12) * 1.35)
+        lh_body  = int(_pt(8)  * 1.35)
+        lh_small = int(_pt(7)  * 1.30)
+        gap      = max(4, lh_body // 3)
+
+        # ── Build QR image ────────────────────────────────────────────────────
+        target_px = int(dpi_x * 2.0)
+        box_size  = max(6, target_px // 33)
+        qr = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=box_size, border=4,
+        )
+        qr.add_data(order_num)
+        qr.make(fit=True)
+        qr_img  = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        qr_size = qr_img.size[0]
+
+        # ── Oversized canvas — will crop to content after drawing ─────────────
+        items_count = len(items) if items else 0
+        max_h = max(4000, qr_size + lh_body * (items_count * 6 + 40) + 800)
+        img  = Image.new("RGB", (pw, max_h), "white")
+        draw = ImageDraw.Draw(img)
+
+        # ── Drawing helpers ───────────────────────────────────────────────────
+        def tw(text, font):
+            return int(font.getlength(text))
+
+        def centered(text, y, font, fill="black"):
+            draw.text(((pw - tw(text, font)) // 2, y), text, fill=fill, font=font)
+
+        def two_col(label, value, y, val_font=None):
+            vf = val_font or f_bold
+            draw.text((pad, y), label, fill="#888888", font=f_body)
+            draw.text((pw - pad - tw(value, vf), y), value, fill="black", font=vf)
+
+        def dashed_sep(y):
+            dash, sp = 5, 4
+            x = pad
+            while x < pw - pad:
+                draw.line([(x, y), (min(x + dash, pw - pad), y)], fill="#aaaaaa", width=1)
+                x += dash + sp
+
+        def dashed_rect(x0, y0, x1, y1):
+            dash, sp = 7, 5
+            for seg in [(x0, y0, x1, y0), (x0, y1, x1, y1)]:  # top, bottom
+                x = seg[0]
+                while x < seg[2]:
+                    draw.line([(x, seg[1]), (min(x + dash, seg[2]), seg[1])],
+                              fill="black", width=2)
+                    x += dash + sp
+            for seg in [(x0, y0, x0, y1), (x1, y0, x1, y1)]:  # left, right
+                yc = seg[1]
+                while yc < seg[3]:
+                    draw.line([(seg[0], yc), (seg[0], min(yc + dash, seg[3]))],
+                              fill="black", width=2)
+                    yc += dash + sp
+
+        def fit_text(text, font, max_w):
+            """Truncate text to fit within max_w pixels."""
+            while text and tw(text, font) > max_w:
+                text = text[:-1]
+            return text
+
+        y = gap * 2
+
+        # ── Studio name header ────────────────────────────────────────────────
+        if studio_name:
+            centered(studio_name.upper(), y, f_large)
+            y += lh_large
+        centered("PICKUP RECEIPT", y, f_small, fill="#888888")
+        y += lh_small
+        if placed_at:
+            centered(_fmt_dt(placed_at), y, f_small, fill="#aaaaaa")
+            y += lh_small
+        y += gap
+        dashed_sep(y)
+        y += lh_small + gap
+
+        # ── Order number box ──────────────────────────────────────────────────
+        inner_pad  = max(6, lh_body // 2)
+        label_text = "ORDER NUMBER"
+        box_h = inner_pad + lh_small + gap // 2 + lh_large + inner_pad
+        dashed_rect(pad, y, pw - pad, y + box_h)
+        centered(label_text, y + inner_pad, f_small, fill="#888888")
+        centered(order_num, y + inner_pad + lh_small + gap // 2, f_large)
+        y += box_h
+        y += gap
+        dashed_sep(y)
+        y += lh_small + gap
+
+        # ── Customer info ─────────────────────────────────────────────────────
+        two_col("Customer", customer, y)
+        y += lh_body
+        if customer_phone:
+            two_col("Phone", customer_phone, y)
+            y += lh_body
+        y += gap
+        dashed_sep(y)
+        y += lh_small + gap
+
+        # ── Items ─────────────────────────────────────────────────────────────
+        if items:
+            draw.text((pad, y), "ITEMS", fill="#888888", font=f_small)
+            y += lh_small + gap // 2
+            shown = set()
+            for i, it in enumerate(items):
+                qty  = it.get("qty", 1)
+                qty_str = f"x{qty}"
+                desc = it.get("desc") or it.get("sku") or ""
+                desc = fit_text(desc, f_bold, pw - pad * 2 - tw(qty_str, f_bold) - 20)
+                two_col(desc, qty_str, y, val_font=f_bold)
+                y += lh_body
+                fnames = images_by_idx.get(i) or images_by_sku.get(it.get("sku", ""), [])
+                for fname in fnames:
+                    if fname not in shown:
+                        shown.add(fname)
+                        fn = fit_text(fname, f_small, pw - pad * 2 - 16)
+                        draw.text((pad + 16, y), fn, fill="#aaaaaa", font=f_small)
+                        y += lh_small
+            y += gap
+            dashed_sep(y)
+            y += lh_small + gap
+
+        # ── QR code ───────────────────────────────────────────────────────────
+        centered("Scan to confirm pickup", y, f_small, fill="#888888")
+        y += lh_small + gap
+        img.paste(qr_img, (max(0, (pw - qr_size) // 2), y))
+        y += qr_size + gap
+        dashed_sep(y)
+        y += lh_small + gap
+
+        # ── Footer studio name ────────────────────────────────────────────────
+        if studio_name:
+            centered(studio_name.upper(), y, f_large)
+            y += lh_large
+        y += gap * 2
+
+        # ── Crop and print ────────────────────────────────────────────────────
+        final_h = y
+        img = img.crop((0, 0, pw, final_h))
+
+        hdc = win32ui.CreateDC()
+        hdc.CreatePrinterDC(printer_name)
+        hdc.StartDoc("PDX Onsite Receipt")
+        hdc.StartPage()
+        dib = ImageWin.Dib(img)
+        dib.draw(hdc.GetSafeHdc(), (0, 0, pw, final_h))
+        hdc.EndPage()
+        hdc.EndDoc()
+        hdc.DeleteDC()
+
+        return True, ""
+
+    except Exception as e:
+        log.warning(f"[Printer] GDI print failed: {e}")
+        return False, str(e)
+
+
 def _print_receipt_escpos(order_num, customer, placed_at, items, images_by_idx,
                           images_by_sku, printer_name, studio_name) -> tuple[bool, str]:
     """Plain ASCII ESC/POS fallback — no QR code, works even if GDI is unavailable."""
@@ -267,9 +455,9 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
     if not printer_name:
         return False, "No printer configured"
 
-    order_num, customer, placed_at, items, images_by_idx, images_by_sku = _parse_order_data(order)
+    order_num, customer, customer_phone, placed_at, items, images_by_idx, images_by_sku = _parse_order_data(order)
 
-    ok, err = _print_receipt_gdi(order_num, customer, placed_at, items,
+    ok, err = _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
                                   images_by_idx, images_by_sku, printer_name, studio_name)
     if ok:
         log.info(f"[Printer] Receipt printed (GDI+QR): {order_num}")

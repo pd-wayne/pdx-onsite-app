@@ -162,13 +162,14 @@ class Poller:
         images_summary = stored["images_json"] if stored else "[]"
 
         order_dict = {
-            "order_num":     order_num,
-            "customer_name": destination.get("recipient", "Unknown"),
-            "gallery":       order_data.get("gallery", ""),
-            "placed_at":     order_data.get("placedAt", ""),
-            "received_at":   stored["received_at"] if stored else datetime.now().isoformat(),
-            "items_json":    json.dumps(items_summary),
-            "images_json":   images_summary,
+            "order_num":      order_num,
+            "customer_name":  destination.get("recipient", "Unknown"),
+            "customer_phone": destination.get("phone", ""),
+            "gallery":        order_data.get("gallery", ""),
+            "placed_at":      order_data.get("placedAt", ""),
+            "received_at":    stored["received_at"] if stored else datetime.now().isoformat(),
+            "items_json":     json.dumps(items_summary),
+            "images_json":    images_summary,
         }
 
         try:
