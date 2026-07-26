@@ -1,107 +1,105 @@
 """
-test_poller.py — Tests for fulfillment mode filtering logic.
+test_poller.py — Tests for order fulfillment mode classification.
 
-Uses the real shipping shapes from actual PhotoDay API responses.
+The old global mode filter (_is_pickup_order, _order_matches_mode) was removed in
+Phase 3.  Classification now happens inline in db.upsert_order() and is stored as
+orders.fulfillment_mode.  These tests exercise that classification via the DB layer.
 """
+import json
+import os
+import tempfile
 import pytest
-from poller import _is_pickup_order, _order_matches_mode
+
+import db
 
 # ── Minimal order shapes ──────────────────────────────────────────────────────
 
-PICKUP = {"shipping": {"option": {"externalId": "pdx_pickup"}}}
-ECONOMY = {"shipping": {"option": {"externalId": "economy"}}}
-OVERNIGHT = {"shipping": {"option": {"externalId": "overnight"}}}
-NO_SHIPPING = {}
-MISSING_OPTION = {"shipping": {}}
-MISSING_EXTERNAL_ID = {"shipping": {"option": {}}}
+PICKUP = {"num": "T-001", "gallery": "g1",
+          "shipping": {"option": {"externalId": "pdx_pickup"},
+                       "destination": {"recipient": "Alice"}}}
+
+ECONOMY = {"num": "T-002", "gallery": "g1",
+           "shipping": {"option": {"externalId": "economy"},
+                        "destination": {"recipient": "Bob"}}}
+
+OVERNIGHT = {"num": "T-003", "gallery": "g1",
+             "shipping": {"option": {"externalId": "overnight"},
+                          "destination": {"recipient": "Carol"}}}
+
+NO_SHIPPING = {"num": "T-004", "gallery": "g1"}
+
+MISSING_OPTION = {"num": "T-005", "gallery": "g1", "shipping": {}}
+
+MISSING_EXTERNAL_ID = {"num": "T-006", "gallery": "g1",
+                       "shipping": {"option": {}}}
 
 
-# ── _is_pickup_order ──────────────────────────────────────────────────────────
+# ── Fixtures ──────────────────────────────────────────────────────────────────
 
-class TestIsPickupOrder:
-    def test_pickup_externalid_returns_true(self):
-        assert _is_pickup_order(PICKUP) is True
+@pytest.fixture(autouse=True)
+def isolated_db(tmp_path, monkeypatch):
+    """Each test gets its own fresh SQLite database."""
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+    db.init_db()
+    yield
 
-    def test_economy_externalid_returns_false(self):
-        assert _is_pickup_order(ECONOMY) is False
 
-    def test_overnight_externalid_returns_false(self):
-        assert _is_pickup_order(OVERNIGHT) is False
+def _mode(order_data: dict) -> str:
+    """Upsert an order and return its stored fulfillment_mode."""
+    db.upsert_order(order_data)
+    order_num = order_data.get("num") or order_data.get("order_num")
+    row = db.get_order(order_num)
+    return row["fulfillment_mode"] if row else None
 
-    def test_missing_shipping_key_returns_false(self):
-        assert _is_pickup_order(NO_SHIPPING) is False
 
-    def test_missing_option_key_returns_false(self):
-        assert _is_pickup_order(MISSING_OPTION) is False
+# ── fulfillment_mode classification ──────────────────────────────────────────
 
-    def test_missing_external_id_returns_false(self):
-        assert _is_pickup_order(MISSING_EXTERNAL_ID) is False
+class TestFulfillmentModeClassification:
+    def test_pickup_externalid_stored_as_pickup(self):
+        assert _mode(PICKUP) == "pickup"
+
+    def test_economy_shipping_stored_as_dropship(self):
+        assert _mode(ECONOMY) == "dropship"
+
+    def test_overnight_shipping_stored_as_dropship(self):
+        assert _mode(OVERNIGHT) == "dropship"
+
+    def test_missing_shipping_stored_as_dropship(self):
+        assert _mode(NO_SHIPPING) == "dropship"
+
+    def test_missing_option_stored_as_dropship(self):
+        assert _mode(MISSING_OPTION) == "dropship"
+
+    def test_missing_external_id_stored_as_dropship(self):
+        assert _mode(MISSING_EXTERNAL_ID) == "dropship"
 
     def test_real_pickup_order(self, pickup_order):
-        assert _is_pickup_order(pickup_order) is True
+        assert _mode(pickup_order) == "pickup"
 
     def test_real_dropship_order(self, dropship_order):
-        assert _is_pickup_order(dropship_order) is False
+        assert _mode(dropship_order) == "dropship"
 
 
-# ── _order_matches_mode ───────────────────────────────────────────────────────
+# ── Job mode derived from first order ────────────────────────────────────────
 
-class TestOrderMatchesMode:
-    # --- pickup mode ---
-    def test_pickup_mode_accepts_pickup(self):
-        assert _order_matches_mode(PICKUP, "pickup") is True
+class TestJobModeDerivation:
+    def test_pickup_order_creates_onsite_job(self):
+        db.upsert_order(PICKUP)
+        job = db.get_job("g1")
+        assert job["fulfillment_mode"] == "onsite"
 
-    def test_pickup_mode_rejects_economy(self):
-        assert _order_matches_mode(ECONOMY, "pickup") is False
+    def test_dropship_order_creates_in_studio_job(self):
+        db.upsert_order(ECONOMY)
+        job = db.get_job("g1")
+        assert job["fulfillment_mode"] == "in_studio"
 
-    def test_pickup_mode_rejects_overnight(self):
-        assert _order_matches_mode(OVERNIGHT, "pickup") is False
-
-    # --- dropship mode ---
-    def test_dropship_mode_accepts_economy(self):
-        assert _order_matches_mode(ECONOMY, "dropship") is True
-
-    def test_dropship_mode_accepts_overnight(self):
-        assert _order_matches_mode(OVERNIGHT, "dropship") is True
-
-    def test_dropship_mode_rejects_pickup(self):
-        assert _order_matches_mode(PICKUP, "dropship") is False
-
-    # --- both mode ---
-    def test_both_mode_accepts_pickup(self):
-        assert _order_matches_mode(PICKUP, "both") is True
-
-    def test_both_mode_accepts_economy(self):
-        assert _order_matches_mode(ECONOMY, "both") is True
-
-    def test_both_mode_accepts_overnight(self):
-        assert _order_matches_mode(OVERNIGHT, "both") is True
-
-    def test_both_mode_accepts_missing_shipping(self):
-        assert _order_matches_mode(NO_SHIPPING, "both") is True
-
-    # --- unknown mode defaults to pickup behaviour ---
-    def test_unknown_mode_accepts_pickup(self):
-        assert _order_matches_mode(PICKUP, "???") is True
-
-    def test_unknown_mode_rejects_non_pickup(self):
-        assert _order_matches_mode(ECONOMY, "???") is False
-
-    # --- real order objects ---
-    def test_real_pickup_in_pickup_mode(self, pickup_order):
-        assert _order_matches_mode(pickup_order, "pickup") is True
-
-    def test_real_dropship_in_pickup_mode(self, dropship_order):
-        assert _order_matches_mode(dropship_order, "pickup") is False
-
-    def test_real_pickup_in_dropship_mode(self, pickup_order):
-        assert _order_matches_mode(pickup_order, "dropship") is False
-
-    def test_real_dropship_in_dropship_mode(self, dropship_order):
-        assert _order_matches_mode(dropship_order, "dropship") is True
-
-    def test_real_pickup_in_both_mode(self, pickup_order):
-        assert _order_matches_mode(pickup_order, "both") is True
-
-    def test_real_dropship_in_both_mode(self, dropship_order):
-        assert _order_matches_mode(dropship_order, "both") is True
+    def test_subsequent_order_does_not_override_job_mode(self):
+        # First pickup order sets job to onsite
+        db.upsert_order(PICKUP)
+        # Second dropship order must not flip the job to in_studio
+        dropship = dict(ECONOMY)
+        dropship["num"] = "T-999"
+        db.upsert_order(dropship)
+        job = db.get_job("g1")
+        assert job["fulfillment_mode"] == "onsite"

@@ -199,7 +199,7 @@ class TestGetHistory:
 class TestGetStats:
     def test_empty_db_zeros(self, fresh_db):
         stats = db.get_stats()
-        assert stats == {"total": 0, "pending": 0, "confirmed": 0, "fulfilled": 0}
+        assert stats == {"total": 0, "pending": 0, "ready": 0, "confirmed": 0, "fulfilled": 0}
 
     def test_one_received_order(self, fresh_db, pickup_order):
         db.upsert_order(pickup_order)

@@ -284,7 +284,7 @@ class TestSystem:
 
     def test_get_version(self, client):
         data = client.get("/api/get_version").get_json()
-        assert data["version"] == "2.0.0"
+        assert data["version"] == "2.0.10"
 
     def test_get_pending_update_default(self, client):
         data = client.get("/api/get_pending_update").get_json()

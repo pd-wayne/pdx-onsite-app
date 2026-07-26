@@ -5,6 +5,7 @@ import json
 import threading
 import time
 import logging
+from collections import defaultdict
 from datetime import datetime
 
 import api
@@ -13,22 +14,6 @@ import db
 import printer
 
 log = logging.getLogger("pdx.poller")
-
-
-def _is_pickup_order(order_data: dict) -> bool:
-    """Return True if the order's shipping option is an onsite pickup."""
-    return order_data.get("shipping", {}).get("option", {}).get("externalId", "") == "pdx_pickup"
-
-
-def _order_matches_mode(order_data: dict, mode: str) -> bool:
-    """Return True if this order should be processed under the current fulfillment mode."""
-    if mode == "both":
-        return True
-    is_pickup = _is_pickup_order(order_data)
-    if mode == "dropship":
-        return not is_pickup
-    # default / "pickup"
-    return is_pickup
 
 
 class Poller:
@@ -107,30 +92,38 @@ class Poller:
 
         self.last_error = ""
         new_count = 0
-        mode = config.load().get("fulfillment_mode", "pickup")
+        cfg = config.load()
 
         for order_data in orders:
-            if not _order_matches_mode(order_data, mode):
-                continue
             is_new = db.upsert_order(order_data)
-            gallery = order_data.get("gallery", "")
-            if gallery:
-                db.upsert_job(gallery)
             if not is_new:
                 continue
 
             new_count += 1
             order_num = order_data.get("num") or order_data.get("order_num")
+            gallery   = order_data.get("gallery", "")
+
+            order    = db.get_order(order_num)
+            job      = db.get_job(gallery) if gallery else None
+            job_mode   = job["fulfillment_mode"] if job else cfg.get("app_mode", "onsite")
+            order_mode = order["fulfillment_mode"] if order else "pickup"
+
+            # Only pickup orders on onsite jobs get a receipt and auto-download.
+            # Dropship orders on onsite jobs are stored only.
+            # In-studio orders are handled by the packing slip workflow (Phase 6).
+            if job_mode != "onsite" or order_mode != "pickup":
+                log.info(f"[Poller] {order_num} ingested ({job_mode}/{order_mode}) — no receipt/download")
+                continue
 
             self._print_receipt(order_num, order_data)
 
-            # In manual mode, operator triggers download via "Send to Printer" button
-            print_mode = config.load().get("print_mode", "auto")
-            if print_mode != "manual":
-                images = db.get_images_json(order_num)
+            # In manual mode the operator triggers download via "Send to Printer"
+            if cfg.get("print_mode", "auto") != "manual":
+                images   = db.get_images_json(order_num)
+                order_id = order["id"] if order else None
                 t = threading.Thread(
                     target=self._download_images,
-                    args=(order_num, images, api_key),
+                    args=(order_num, order_id, images, api_key),
                     daemon=True
                 )
                 t.start()
@@ -181,29 +174,81 @@ class Poller:
         except Exception as e:
             log.error(f"[Poller] Receipt exception for {order_num}: {e}")
 
-    def _download_images(self, order_num: str, images: list, api_key: str):
-        cfg = config.load()
-        output_folder = cfg.get("image_output_folder", "")
-
-        if not output_folder:
-            log.warning(f"[Download] No output folder configured — skipping {order_num}")
-            db.set_download_status(order_num, "failed", "No image output folder configured")
+    def _download_images(self, order_num: str, order_id, images: list, api_key: str):
+        if not images:
+            log.warning(f"[Download] No images for {order_num}")
             if self.on_download_done:
-                self.on_download_done(order_num, False, "No image output folder configured")
+                self.on_download_done(order_num, True, "")
             return
 
-        log.info(f"[Download] Starting download for {order_num} ({len(images)} image(s))")
-        ok, err = printer.download_images(images, output_folder, order_num=order_num, api_key=api_key)
-
-        if ok:
-            db.set_download_status(order_num, "ok")
-            log.info(f"[Download] Complete for {order_num}")
-        else:
+        default_dest = db.get_default_destination()
+        if not default_dest:
+            err = "No destinations configured"
+            log.warning(f"[Download] {err} — skipping {order_num}")
             db.set_download_status(order_num, "failed", err)
-            log.warning(f"[Download] Failed for {order_num}: {err}")
+            if self.on_download_done:
+                self.on_download_done(order_num, False, err)
+            return
+
+        log.info(f"[Download] Starting routed download for {order_num} ({len(images)} image(s))")
+
+        # Group images by their resolved destination
+        groups = defaultdict(list)
+        for img in images:
+            print_spec = img.get("print_spec", "")
+            dest = db.get_destination_for_spec(print_spec)
+            if not dest:
+                dest = default_dest
+            if dest["id"] == default_dest["id"] and print_spec:
+                log.warning(f"[Download] Spec '{print_spec}' unassigned — routing to default destination")
+            groups[dest["id"]].append((img, dest))
+
+        overall_ok = True
+        overall_err = ""
+        item_ids_by_dest = defaultdict(list)
+
+        for dest_id, img_dest_list in groups.items():
+            dest   = img_dest_list[0][1]
+            imgs   = [p[0] for p in img_dest_list]
+            folder = dest["hot_folder_path"]
+
+            if not folder:
+                log.warning(f"[Download] Destination '{dest['name']}' has no path — skipping {len(imgs)} image(s)")
+                continue
+
+            # Create order_items rows before attempting download
+            if order_id is not None:
+                for img in imgs:
+                    item_id = db.insert_order_item(
+                        order_id, img["filename"], img.get("print_spec", ""), dest_id
+                    )
+                    item_ids_by_dest[dest_id].append(item_id)
+
+            ok, err = printer.download_images(imgs, folder, order_num=order_num, api_key=api_key)
+
+            if ok:
+                if order_id is not None:
+                    for item_id in item_ids_by_dest[dest_id]:
+                        db.update_item_status(item_id, "printed")
+                db.update_destination_health(dest_id)
+                log.info(f"[Download] {len(imgs)} image(s) → '{dest['name']}' ({folder})")
+            else:
+                if order_id is not None:
+                    for item_id in item_ids_by_dest[dest_id]:
+                        db.update_item_status(item_id, "error")
+                log.warning(f"[Download] Failed for dest '{dest['name']}': {err}")
+                overall_ok = False
+                overall_err = err
+
+        if overall_ok:
+            db.set_download_status(order_num, "ok")
+            if order_id is not None and db.check_order_ready(order_num):
+                log.info(f"[Download] {order_num} → ready for pickup")
+        else:
+            db.set_download_status(order_num, "failed", overall_err)
 
         if self.on_download_done:
-            self.on_download_done(order_num, ok, err)
+            self.on_download_done(order_num, overall_ok, overall_err)
 
     def get_status(self) -> dict:
         with self._lock:
