@@ -456,6 +456,45 @@ body{display:flex;flex-direction:column}
 }
 .btn-retry:hover{background:var(--red-bg)}
 
+/* ── Queue empty state (no job selected) ──────────────────────────────────── */
+.queue-no-job{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:80px 20px;text-align:center;
+}
+.queue-no-job-icon{font-size:48px;opacity:.25;margin-bottom:12px}
+.queue-no-job-title{font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px}
+.queue-no-job-sub{font-size:12px;color:var(--text3)}
+
+/* ── Job mode chip ─────────────────────────────────────────────────────────── */
+.mode-chip{
+  display:inline-flex;align-items:center;font-size:9px;font-weight:700;
+  letter-spacing:.04em;text-transform:uppercase;padding:2px 6px;
+  border-radius:999px;cursor:pointer;transition:opacity .15s;
+}
+.mode-chip:hover{opacity:.75}
+.mode-chip.onsite{background:rgba(59,130,246,.15);color:#60a5fa;border:1px solid rgba(59,130,246,.25)}
+.mode-chip.studio{background:rgba(168,85,247,.15);color:#c084fc;border:1px solid rgba(168,85,247,.25)}
+
+/* ── Destinations ──────────────────────────────────────────────────────────── */
+.dest-row{
+  display:flex;align-items:center;gap:6px;padding:5px 0;
+  border-bottom:1px solid var(--border);
+}
+.dest-row:last-child{border-bottom:none}
+.dest-default-label{
+  display:flex;align-items:center;gap:4px;font-size:11px;
+  color:var(--text2);white-space:nowrap;cursor:pointer;flex-shrink:0;
+}
+.dest-delete{color:var(--red)!important;opacity:.6}
+.dest-delete:hover{opacity:1}
+
+/* ── Routing table ─────────────────────────────────────────────────────────── */
+.routing-unassigned td{background:rgba(234,179,8,.04)}
+.routing-unassigned .td-mono{color:var(--amber)}
+
+/* ── Job option flex layout (mode chip needs flex row) ─────────────────────── */
+.job-option{display:flex;align-items:center;gap:6px}
+
 ::-webkit-scrollbar{width:4px;height:4px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:2px}

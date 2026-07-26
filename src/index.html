@@ -63,6 +63,12 @@
 
       <!-- Queue -->
       <div id="panel-queue" class="panel active">
+        <div id="queue-no-job" class="queue-no-job" style="display:none">
+          <div class="queue-no-job-icon">⌖</div>
+          <div class="queue-no-job-title">Select a job to view its queue</div>
+          <div class="queue-no-job-sub">Choose a job from the sidebar to filter orders for that event</div>
+        </div>
+        <div id="queue-content">
         <div class="panel-header" style="flex-wrap:wrap;gap:10px">
           <h1 class="panel-title">Live Queue</h1>
           <div style="display:flex;align-items:center;gap:12px;margin-left:auto;flex-wrap:wrap">
@@ -86,7 +92,8 @@
             <tbody id="queue-tbody"></tbody>
           </table>
         </div>
-      </div>
+      </div><!-- /queue-content -->
+      </div><!-- /panel-queue -->
 
       <!-- Scan -->
       <div id="panel-scan" class="panel">
@@ -177,6 +184,25 @@
             <div class="form-hint">Folder of sample/display images for the Samples Browser.</div>
           </div>
         </div>
+        <div class="settings-section">
+          <div class="settings-section-title">Destinations
+            <button class="btn-xs btn-xs-blue" onclick="addDestination()" style="margin-left:8px">+ Add</button>
+          </div>
+          <div id="destinations-list"></div>
+          <div class="form-hint" style="margin-top:6px">Each destination is a hot folder. Mark one as default — it catches any product not explicitly routed.</div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            Product Routing
+            <button class="btn-secondary" style="font-size:11px;padding:3px 10px" onclick="discoverSpecs()">🔍 Discover Products</button>
+            <span id="discover-status" style="font-size:11px;color:var(--text3);font-weight:400"></span>
+          </div>
+          <div id="routing-table-wrap">
+            <div style="color:var(--text3);font-size:12px;padding:8px 0">No product specs found. Click Discover Products or wait for orders to arrive.</div>
+          </div>
+        </div>
+
         <div class="settings-section">
           <div class="settings-section-title">Print Mode</div>
           <div class="form-row">

@@ -16,6 +16,8 @@ const state = {
   jobs: [],
   queueFilter: "pending",
   queueSortAsc: false,
+  destinations: [],
+  routing: [],
 };
 
 // ── API helpers ────────────────────────────────────────────────────────────
@@ -107,11 +109,18 @@ function renderJobDropdown(query = "") {
     All Jobs <span style="color:var(--text3);font-size:10px">(${state.stats.total||0} orders)</span>
   </div>`;
 
-  const jobsHtml = filtered.map(j => `
+  const jobsHtml = filtered.map(j => {
+    const isStudio = j.fulfillment_mode === "in_studio";
+    const modeLabel = isStudio ? "studio" : "onsite";
+    return `
     <div class="job-option${state.galleryFilter === j.gallery ? " selected" : ""}" onclick="selectJob(${JSON.stringify(j.gallery)})">
-      ${esc(j.gallery)}
-      <span style="color:var(--text3);font-size:10px"> (${j.order_count})</span>
-    </div>`).join("");
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(j.gallery)}</span>
+      <span style="display:flex;align-items:center;gap:5px;flex-shrink:0">
+        <span class="mode-chip ${modeLabel}" title="Click to toggle mode" onclick="event.stopPropagation();toggleJobMode(${JSON.stringify(j.gallery)}, '${j.fulfillment_mode}')">${modeLabel}</span>
+        <span style="color:var(--text3);font-size:10px">${j.order_count}</span>
+      </span>
+    </div>`;
+  }).join("");
 
   dd.innerHTML = allJobsHtml + (jobsHtml || '<div class="job-option" style="color:var(--text3)">No jobs found</div>');
 }
@@ -223,6 +232,18 @@ function toggleQueueSort() {
 }
 
 function renderQueue() {
+  const noJob  = document.getElementById("queue-no-job");
+  const content = document.getElementById("queue-content");
+  if (noJob && content) {
+    if (!state.galleryFilter) {
+      noJob.style.display = "flex";
+      content.style.display = "none";
+      return;
+    }
+    noJob.style.display = "none";
+    content.style.display = "block";
+  }
+
   const tbody = document.getElementById("queue-tbody");
   const threshold = state.unclaimed_threshold;
   const now = Date.now();
@@ -696,6 +717,9 @@ async function retryDownload(orderNum, btn) {
 // ── Settings ───────────────────────────────────────────────────────────────
 async function loadSettings() {
   try {
+    await Promise.all([loadDestinations(), loadRouting()]);
+  } catch(e) { console.warn("[Settings] routing load:", e); }
+  try {
     const cfg = await apiGet("get_settings");
     document.getElementById("s-lab-id").value = cfg.lab_id || "";
     document.getElementById("s-api-key").value = cfg.api_key || "";
@@ -976,6 +1000,169 @@ function handleUpdateProgress(data) {
 
 function hideUpdateProgress() {
   document.getElementById('update-progress-bar').style.display = 'none';
+}
+
+// ── Destinations ───────────────────────────────────────────────────────────
+async function loadDestinations() {
+  state.destinations = await apiGet("get_destinations");
+  renderDestinations();
+}
+
+function renderDestinations() {
+  const list = document.getElementById("destinations-list");
+  if (!list) return;
+  const dests = state.destinations;
+  if (!dests.length) {
+    list.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:6px 0">No destinations yet. Add one above.</div>`;
+    return;
+  }
+  list.innerHTML = dests.map(d => `
+    <div class="dest-row" id="dest-row-${d.id}">
+      <input class="form-input" style="width:130px;flex-shrink:0" id="dest-name-${d.id}" value="${esc(d.name)}" placeholder="Name">
+      <input class="form-input mono" style="flex:1;min-width:0" id="dest-path-${d.id}" value="${esc(d.hot_folder_path)}" placeholder="C:\\Hot Folder\\Path">
+      <button class="btn-xs btn-xs-ghost" onclick="browseDestFolder(${d.id})">…</button>
+      <label class="dest-default-label" title="Use as fallback for unmapped products">
+        <input type="radio" name="dest-default" value="${d.id}" ${d.is_default ? "checked" : ""}> Default
+      </label>
+      <button class="btn-xs btn-xs-blue" onclick="saveDestination(${d.id})">Save</button>
+      <button class="btn-xs btn-xs-ghost dest-delete" onclick="deleteDestination(${d.id})">✕</button>
+    </div>`).join("");
+}
+
+function addDestination() {
+  const list = document.getElementById("destinations-list");
+  if (!list || document.getElementById("dest-row-new")) return;
+  const row = document.createElement("div");
+  row.className = "dest-row";
+  row.id = "dest-row-new";
+  row.innerHTML = `
+    <input class="form-input" style="width:130px;flex-shrink:0" id="dest-name-new" placeholder="Name (e.g. 8x10)">
+    <input class="form-input mono" style="flex:1;min-width:0" id="dest-path-new" placeholder="C:\\Hot Folder\\Path">
+    <button class="btn-xs btn-xs-ghost" onclick="browseDestFolderNew()">…</button>
+    <label class="dest-default-label">
+      <input type="radio" name="dest-default" value="0"> Default
+    </label>
+    <button class="btn-xs btn-xs-blue" onclick="saveNewDestination()">Save</button>
+    <button class="btn-xs btn-xs-ghost dest-delete" onclick="document.getElementById('dest-row-new').remove()">✕</button>
+  `;
+  list.insertBefore(row, list.firstChild);
+  document.getElementById("dest-name-new").focus();
+}
+
+async function saveDestination(id) {
+  const name = document.getElementById(`dest-name-${id}`)?.value.trim();
+  const path = document.getElementById(`dest-path-${id}`)?.value.trim();
+  const isDefault = document.querySelector(`input[name="dest-default"][value="${id}"]`)?.checked || false;
+  if (!name || !path) { toast("Name and path are required", "error"); return; }
+  const result = await apiPost("save_destination", { id, name, hot_folder_path: path, is_default: isDefault, active: true });
+  if (result.ok) { await loadDestinations(); renderRouting(); toast("Destination saved", "success"); }
+  else toast(`Save failed: ${result.error}`, "error");
+}
+
+async function saveNewDestination() {
+  const name = document.getElementById("dest-name-new")?.value.trim();
+  const path = document.getElementById("dest-path-new")?.value.trim();
+  const isDefault = document.querySelector('input[name="dest-default"][value="0"]')?.checked || false;
+  if (!name || !path) { toast("Name and path are required", "error"); return; }
+  const result = await apiPost("save_destination", { name, hot_folder_path: path, is_default: isDefault, active: true });
+  if (result.ok) { await loadDestinations(); renderRouting(); toast("Destination added", "success"); }
+  else toast(`Save failed: ${result.error}`, "error");
+}
+
+async function deleteDestination(id) {
+  if (!confirm("Remove this destination?")) return;
+  const result = await apiPost("delete_destination", { id });
+  if (result.ok) { await loadDestinations(); await loadRouting(); }
+  else toast(result.error, "error");
+}
+
+async function browseDestFolder(id) {
+  const result = await apiGet("browse_folder_dest");
+  if (result.ok && result.path) {
+    const el = document.getElementById(`dest-path-${id}`);
+    if (el) el.value = result.path;
+  }
+}
+
+async function browseDestFolderNew() {
+  const result = await apiGet("browse_folder_dest");
+  if (result.ok && result.path) {
+    const el = document.getElementById("dest-path-new");
+    if (el) el.value = result.path;
+  }
+}
+
+// ── Product routing ─────────────────────────────────────────────────────────
+async function loadRouting() {
+  state.routing = await apiGet("get_routing");
+  renderRouting();
+}
+
+function renderRouting() {
+  const wrap = document.getElementById("routing-table-wrap");
+  if (!wrap) return;
+  const rows = state.routing;
+  const dests = state.destinations;
+
+  if (!rows.length) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:8px 0">No product specs found. Click Discover Products or wait for orders to arrive.</div>`;
+    return;
+  }
+
+  const destOpts = (currentId) =>
+    `<option value="">— Unassigned —</option>` +
+    dests.map(d => `<option value="${d.id}" ${d.id === currentId ? "selected" : ""}>${esc(d.name)}</option>`).join("");
+
+  wrap.innerHTML = `
+    <table class="history-table" style="margin-top:6px">
+      <thead><tr><th>Print Spec</th><th>Destination</th></tr></thead>
+      <tbody>${rows.map(r => `
+        <tr class="${!r.destination_id ? "routing-unassigned" : ""}">
+          <td class="td-mono" style="font-size:11px">${!r.destination_id ? "⚠ " : ""}${esc(r.print_spec)}</td>
+          <td>
+            <select class="form-select" style="font-size:11px;padding:3px 8px"
+                    onchange="setRouting('${esc(r.print_spec).replace(/'/g,"\\'")}', this.value ? parseInt(this.value) : null)">
+              ${destOpts(r.destination_id)}
+            </select>
+          </td>
+        </tr>`).join("")}
+      </tbody>
+    </table>`;
+}
+
+async function setRouting(printSpec, destinationId) {
+  const result = await apiPost("save_routing", { print_spec: printSpec, destination_id: destinationId || null });
+  if (result.ok) { await loadRouting(); }
+  else toast(`Routing save failed: ${result.error}`, "error");
+}
+
+async function discoverSpecs() {
+  const statusEl = document.getElementById("discover-status");
+  if (statusEl) { statusEl.textContent = "Discovering…"; statusEl.style.color = "var(--text2)"; }
+  const result = await apiPost("discover_specs", {});
+  if (result.ok) {
+    await loadRouting();
+    const msg = result.added > 0
+      ? `Found ${result.found} spec(s), added ${result.added} new`
+      : `Found ${result.found} spec(s) — all already mapped`;
+    if (statusEl) { statusEl.textContent = msg; statusEl.style.color = "var(--text3)"; }
+    if (result.added > 0) toast(`${result.added} new product spec(s) discovered`, "info");
+  } else {
+    if (statusEl) { statusEl.textContent = result.error; statusEl.style.color = "var(--red)"; }
+    toast(`Discover failed: ${result.error}`, "error");
+  }
+}
+
+// ── Job mode ────────────────────────────────────────────────────────────────
+async function toggleJobMode(gallery, currentMode) {
+  const newMode = currentMode === "onsite" ? "in_studio" : "onsite";
+  const result = await apiPost("update_job_mode", { gallery, mode: newMode });
+  if (result.ok) {
+    await refreshJobs();
+    toast(`${esc(gallery)}: ${newMode === "onsite" ? "Onsite" : "In-Studio"}`, "info");
+  } else {
+    toast(`Mode update failed: ${result.error}`, "error");
+  }
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────

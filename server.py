@@ -46,6 +46,11 @@ def _log(msg: str, level: str = "info"):
 def create_app(poller, ui_path: str) -> Flask:
     app = Flask(__name__, static_folder=None)
 
+    # Seed default destination from config on startup (no-op if destinations exist)
+    cfg = config.load()
+    if cfg.get("image_output_folder"):
+        db.seed_default_destination(cfg["image_output_folder"])
+
     poller.on_new_orders    = lambda count:      (push_event("new_orders", {"count": count}), _log(f"📦 {count} new order(s) received"))
     poller.on_poll_complete = lambda ts:         push_event("poll_complete", {"timestamp": ts})
     poller.on_error         = lambda err:        (push_event("poll_error", {"error": err}), _log(f"Poll error: {err}", "error"))
@@ -92,6 +97,8 @@ def create_app(poller, ui_path: str) -> Flask:
                 poller.configure(data.get("lab_id", ""), data.get("api_key", ""), int(data.get("poll_interval", 60)))
                 if data.get("lab_id") and data.get("api_key") and not poller.running:
                     poller.start()
+                if data.get("image_output_folder"):
+                    db.seed_default_destination(data["image_output_folder"])
                 # Seed jobs from historical orders in background
                 if data.get("lab_id") and data.get("api_key"):
                     threading.Thread(target=_seed_jobs_background,
@@ -195,6 +202,102 @@ def create_app(poller, ui_path: str) -> Flask:
 
         threading.Thread(target=_fetch, daemon=True).start()
         return jsonify({"ok": True, "message": "Fetching job history…"})
+
+    # ── Destinations ──────────────────────────────────────────────────────────
+
+    @app.route("/api/get_destinations")
+    def get_destinations():
+        return jsonify(db.get_destinations())
+
+    @app.route("/api/save_destination", methods=["POST"])
+    def save_destination():
+        data = request.get_json()
+        try:
+            dest_id = db.upsert_destination(
+                name=data["name"].strip(),
+                hot_folder_path=data["hot_folder_path"].strip(),
+                is_default=bool(data.get("is_default", False)),
+                active=bool(data.get("active", True)),
+                dest_id=data.get("id") or None,
+            )
+            return jsonify({"ok": True, "id": dest_id})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)})
+
+    @app.route("/api/delete_destination", methods=["POST"])
+    def delete_destination():
+        data = request.get_json()
+        ok = db.delete_destination(data.get("id"))
+        if ok:
+            return jsonify({"ok": True})
+        return jsonify({"ok": False, "error": "Destination is in use by existing order items and cannot be deleted"})
+
+    @app.route("/api/browse_folder_dest")
+    def browse_folder_dest():
+        """Same as browse_folder but used for destination path selection."""
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            path = filedialog.askdirectory(title="Select Destination Folder")
+            root.destroy()
+            if path:
+                return jsonify({"ok": True, "path": os.path.normpath(path)})
+            return jsonify({"ok": False, "path": ""})
+        except Exception as e:
+            return jsonify({"ok": False, "path": "", "error": str(e)})
+
+    # ── Product routing ────────────────────────────────────────────────────────
+
+    @app.route("/api/get_routing")
+    def get_routing():
+        return jsonify(db.get_routing())
+
+    @app.route("/api/save_routing", methods=["POST"])
+    def save_routing():
+        data = request.get_json()
+        try:
+            row_id = db.upsert_routing(
+                print_spec=data["print_spec"],
+                destination_id=data.get("destination_id") or None,
+            )
+            return jsonify({"ok": True, "id": row_id})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)})
+
+    @app.route("/api/discover_specs", methods=["POST"])
+    def discover_specs_endpoint():
+        cfg = config.load()
+        lab_id  = cfg.get("lab_id", "")
+        api_key = cfg.get("api_key", "")
+        if not lab_id or not api_key:
+            return jsonify({"ok": False, "error": "No credentials configured"})
+        orders, err = pdx_api.poll_orders(lab_id, api_key)
+        if err:
+            return jsonify({"ok": False, "error": err})
+        specs = set()
+        for order in orders:
+            for item in order.get("items", []):
+                for img in item.get("images", []):
+                    spec = img.get("externalId", "")
+                    if spec:
+                        specs.add(spec)
+        added = db.discover_specs(list(specs))
+        return jsonify({"ok": True, "found": len(specs), "added": added})
+
+    # ── Job mode ───────────────────────────────────────────────────────────────
+
+    @app.route("/api/update_job_mode", methods=["POST"])
+    def update_job_mode():
+        data = request.get_json()
+        gallery      = data.get("gallery", "")
+        mode         = data.get("mode", "onsite")
+        show_dropship = data.get("show_dropship")
+        if not gallery:
+            return jsonify({"ok": False, "error": "No gallery specified"})
+        db.update_job_mode(gallery, mode,
+                           show_dropship=None if show_dropship is None else bool(show_dropship))
+        return jsonify({"ok": True})
 
     # ── Queue / History / Search ───────────────────────────────────────────────
 
