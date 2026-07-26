@@ -58,6 +58,7 @@ def init_db():
                 download_error   TEXT,
                 fulfill_status   TEXT NOT NULL DEFAULT 'unfulfilled',
                 fulfillment_mode TEXT,
+                is_bulk          INTEGER NOT NULL DEFAULT 0,
                 raw_json         TEXT
             )
         """)
@@ -131,6 +132,7 @@ def init_db():
             ("fulfill_status",  "TEXT NOT NULL DEFAULT 'unfulfilled'"),
             ("images_json",     "TEXT"),
             ("fulfillment_mode", "TEXT"),
+            ("is_bulk",         "INTEGER NOT NULL DEFAULT 0"),
         ])
         _migrate_columns(conn, "jobs", [
             ("fulfillment_mode", "TEXT NOT NULL DEFAULT 'onsite'"),
@@ -178,6 +180,11 @@ def upsert_order(order_data: dict) -> bool:
         else "dropship"
     )
 
+    # Bulk = a non-empty groups[] (each group is one recipient's sub-order within
+    # a batch shipped together to one organization). isBulkOrder isn't a reliable
+    # signal — confirmed absent/inconsistent against real PDX samples.
+    is_bulk = 1 if order_data.get("groups") else 0
+
     items = order_data.get("items", [])
     images = []
     items_summary = []
@@ -222,13 +229,13 @@ def upsert_order(order_data: dict) -> bool:
             INSERT INTO orders
                 (order_num, customer_name, gallery, items_json, images_json,
                  placed_at, received_at, status, download_status, fulfill_status,
-                 fulfillment_mode, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'unfulfilled', ?, ?)
+                 fulfillment_mode, is_bulk, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'unfulfilled', ?, ?, ?)
         """, (
             order_num, customer_name, gallery,
             json.dumps(items_summary), json.dumps(images),
             placed_at, datetime.now().isoformat(), db_status,
-            fulfillment_mode, json.dumps(order_data)
+            fulfillment_mode, is_bulk, json.dumps(order_data)
         ))
         conn.commit()
 

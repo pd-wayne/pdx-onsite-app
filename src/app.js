@@ -423,7 +423,7 @@ function renderQueue() {
          </div>`;
 
     return `<tr class="${rowClass}" onclick="openDetail('${esc(o.order_num)}')" style="cursor:pointer">
-      <td class="td-mono" style="font-size:10px">${esc(o.order_num)}</td>
+      <td class="td-mono" style="font-size:10px">${esc(o.order_num)}${o.is_bulk ? `<span class="bulk-tag" title="Bulk order — ships as one batch to an organization">Bulk</span>` : ""}</td>
       <td class="td-bold" style="font-size:12px">${esc(o.customer_name)}</td>
       <td style="font-size:11px;color:var(--text3);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(o.gallery||"—")}</td>
       <td style="font-size:11px">${esc(itemStr)} ${dlIcon}${specChips}</td>
@@ -441,7 +441,8 @@ async function openDetail(orderNum) {
   if (order.error) { toast("Order not found", "error"); return; }
   state.selectedOrder = order;
 
-  document.getElementById("detail-order-num").textContent = order.order_num;
+  document.getElementById("detail-order-num").innerHTML = esc(order.order_num) +
+    (order.is_bulk ? `<span class="bulk-tag" title="Bulk order — ships as one batch to an organization">Bulk</span>` : "");
   document.getElementById("detail-customer").textContent = order.customer_name;
   document.getElementById("detail-gallery").textContent = order.gallery || "—";
   document.getElementById("detail-placed").textContent = formatTime(order.placed_at);

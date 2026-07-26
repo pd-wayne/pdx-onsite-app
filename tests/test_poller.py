@@ -86,6 +86,78 @@ class TestFulfillmentModeClassification:
         assert _mode(dropship_order) == "dropship"
 
 
+# ── is_bulk classification ────────────────────────────────────────────────────
+# A studio owner uses this to spot, at a glance in the queue, which orders are
+# bulk shipments (multiple grouped sub-orders bound for one organization) vs a
+# single order — independent of pickup/dropship. Derived from a non-empty
+# groups[] on the raw PDX payload (isBulkOrder isn't reliable — confirmed
+# absent/inconsistent against real samples).
+
+def _is_bulk(order_data: dict) -> bool:
+    db.upsert_order(order_data)
+    order_num = order_data.get("num") or order_data.get("order_num")
+    row = db.get_order(order_num)
+    return bool(row["is_bulk"]) if row else None
+
+
+BULK_WITH_GROUPS = {"num": "T-010", "gallery": "g2",
+                    "shipping": {"option": {"externalId": "pdx_bulk_nextday"},
+                                 "destination": {"recipient": "Production Facility"}},
+                    "groups": [{"id": 1, "fields": [{"key": "first_name", "value": "A"}]}]}
+
+NO_GROUPS_KEY = {"num": "T-011", "gallery": "g2",
+                 "shipping": {"option": {"externalId": "pdx_ECON"},
+                              "destination": {"recipient": "Someone"}}}
+
+EMPTY_GROUPS = {"num": "T-012", "gallery": "g2",
+                "shipping": {"option": {"externalId": "pdx_pickup"},
+                             "destination": {"recipient": "Someone"}},
+                "groups": []}
+
+
+class TestIsBulkClassification:
+    def test_non_empty_groups_is_bulk(self):
+        assert _is_bulk(BULK_WITH_GROUPS) is True
+
+    def test_missing_groups_key_is_not_bulk(self):
+        assert _is_bulk(NO_GROUPS_KEY) is False
+
+    def test_empty_groups_is_not_bulk(self):
+        assert _is_bulk(EMPTY_GROUPS) is False
+
+    def test_bulk_is_independent_of_pickup_dropship(self):
+        # A pickup order can still be bulk (groups present) — is_bulk and
+        # fulfillment_mode are two separate axes, not derived from each other.
+        pickup_bulk = {"num": "T-013", "gallery": "g2",
+                       "shipping": {"option": {"externalId": "pdx_pickup"},
+                                    "destination": {"recipient": "Someone"}},
+                       "groups": [{"id": 1, "fields": []}]}
+        assert _mode(pickup_bulk) == "pickup"
+        assert _is_bulk(pickup_bulk) is True
+
+    def test_real_bulk_sample_is_bulk(self):
+        real_bulk = {
+            "num": "BAP1752155240", "gallery": "PDX Bulk Drop",
+            "shipping": {"option": {"externalId": "pdx_bulk_nextday"},
+                        "destination": {"recipient": "Production Facility"}},
+            "groups": [
+                {"id": 1, "fields": [{"key": "first_name", "value": "Jamie"}]},
+                {"id": 2, "fields": [{"key": "first_name", "value": "Jamie"}]},
+            ],
+        }
+        assert _is_bulk(real_bulk) is True
+
+    def test_real_non_bulk_sample_with_groupid_is_not_bulk(self):
+        # order ZI1784299034: every item carries a groupId, groups itself is []
+        real_non_bulk = {
+            "num": "ZI1784299034", "gallery": "PDX Bulk Test",
+            "shipping": {"option": {"externalId": "pdx_ECON"},
+                        "destination": {"recipient": "Martha R. Piovesan"}},
+            "groups": [],
+        }
+        assert _is_bulk(real_non_bulk) is False
+
+
 # ── Job mode derived from first order ────────────────────────────────────────
 
 class TestJobModeDerivation:
