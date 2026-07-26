@@ -291,3 +291,50 @@ class TestRealBulkOrderSample:
         assert captured_headers[0]["group_label"] == "Jamie Doe"
         # first/last name excluded from the field list below the label — only "num" remains
         assert captured_headers[0]["fields"] == [{"key": "num", "value": "HE1752168291"}]
+
+
+class TestNonBulkOrderWithGroupIdButEmptyGroups:
+    """A second real PDX sample (order ZI1784299034): every item carries a
+    groupId even on a plain, non-grouped order — isBulkOrder is explicitly
+    False AND groups is simply []. Confirms groupId presence alone must never
+    trigger group-splitting; only a non-empty groups[] does."""
+
+    def _order(self):
+        raw = {
+            "id": "cf5679e1", "num": "ZI1784299034",
+            "items": [
+                {"id": "ae76dc36", "groupId": 1, "quantity": 1, "externalId": "5555",
+                 "description": "5x7 Print",
+                 "images": [{"filename": "a.jpg", "externalId": "5X7", "orientation": "vertical"}]},
+                {"id": "ae6f19f1", "groupId": 1, "quantity": 1, "externalId": "mem-mat-8x10",
+                 "description": "Memory Mate Horizontal 10x8",
+                 "images": [{"filename": "b.jpg", "externalId": "mmh-1008", "orientation": "horizontal"}]},
+            ],
+            "groups": [],
+            "gallery": "PDX Bulk Test", "placedAt": "2026-07-17T14:39:39.375Z",
+            "shipping": {"option": {"externalId": "pdx_ECON"},
+                        "destination": {"recipient": "Martha R. Piovesan", "city": "Winter park",
+                                        "state": "FL", "zipCode": "32789-2919"}},
+            "isBulkOrder": False, "pricingGroup": None, "totalLabCostCents": 30,
+        }
+        return {
+            "order_num": "ZI1784299034", "gallery": "PDX Bulk Test", "status": "received",
+            "customer_name": "Martha R. Piovesan",
+            "images_json": json.dumps([
+                {"filename": "a.jpg", "item_desc": "5x7 Print", "print_spec": "5X7"},
+                {"filename": "b.jpg", "item_desc": "Memory Mate Horizontal 10x8", "print_spec": "mmh-1008"},
+            ]),
+            "raw_json": json.dumps(raw),
+        }
+
+    def test_renders_as_a_single_standard_slip_not_split(self):
+        pages = printer.build_packing_slip_pages(self._order(), [])
+        assert len(pages) == 1
+
+    def test_standard_header_used_not_group_label(self, monkeypatch):
+        captured_headers = []
+        monkeypatch.setattr(printer, "_render_packing_slip_pages",
+                            lambda order_num, header, rows, *a, **k: (captured_headers.append(header) or ["page"]))
+        printer.build_packing_slip_pages(self._order(), [])
+        assert "group_label" not in captured_headers[0]
+        assert captured_headers[0]["customer"] == "Martha R. Piovesan"
