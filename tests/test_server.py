@@ -298,6 +298,87 @@ class TestOrderActions:
         assert resp.get_json()["ok"] is False
 
 
+# ── Packing slip (in-studio) ────────────────────────────────────────────────────
+
+class TestPackingSlip:
+    def test_packing_slip_pdf_no_orders_specified(self, client):
+        resp = client.post("/api/packing_slip_pdf",
+                           data=json.dumps({"order_nums": []}),
+                           content_type="application/json")
+        assert resp.status_code == 400
+        assert resp.get_json()["ok"] is False
+
+    def test_packing_slip_pdf_order_not_found(self, client):
+        resp = client.post("/api/packing_slip_pdf",
+                           data=json.dumps({"order_nums": ["NOTEXIST"]}),
+                           content_type="application/json")
+        assert resp.status_code == 404
+        assert resp.get_json()["ok"] is False
+
+    def test_packing_slip_pdf_returns_real_pdf(self, client, pickup_order):
+        db.upsert_order(pickup_order)
+        resp = client.post("/api/packing_slip_pdf",
+                           data=json.dumps({"order_nums": [pickup_order["num"]]}),
+                           content_type="application/json")
+        assert resp.status_code == 200
+        assert resp.content_type == "application/pdf"
+        assert resp.data[:4] == b"%PDF"
+
+    def test_packing_slip_pdf_combines_multiple_orders(self, client, pickup_order, dropship_order):
+        db.upsert_order(pickup_order)
+        db.upsert_order(dropship_order)
+        one = client.post("/api/packing_slip_pdf",
+                          data=json.dumps({"order_nums": [pickup_order["num"]]}),
+                          content_type="application/json").data
+        two = client.post("/api/packing_slip_pdf",
+                          data=json.dumps({"order_nums": [pickup_order["num"], dropship_order["num"]]}),
+                          content_type="application/json").data
+        assert len(two) > len(one)
+
+    def test_packing_slip_pdf_skips_missing_orders_in_a_batch(self, client, pickup_order):
+        db.upsert_order(pickup_order)
+        resp = client.post("/api/packing_slip_pdf",
+                           data=json.dumps({"order_nums": [pickup_order["num"], "NOTEXIST"]}),
+                           content_type="application/json")
+        assert resp.status_code == 200
+        assert resp.data[:4] == b"%PDF"
+
+    def test_mark_slips_printed_unknown_order_not_marked(self, client):
+        resp = client.post("/api/mark_slips_printed",
+                           data=json.dumps({"order_nums": ["NOTEXIST"]}),
+                           content_type="application/json")
+        result = resp.get_json()
+        assert result["ok"] is True
+        assert result["marked"] == []
+
+    def test_mark_slips_printed_single_order(self, client, pickup_order):
+        db.upsert_order(pickup_order)
+        resp = client.post("/api/mark_slips_printed",
+                           data=json.dumps({"order_nums": [pickup_order["num"]]}),
+                           content_type="application/json")
+        result = resp.get_json()
+        assert result["ok"] is True
+        assert result["marked"] == [pickup_order["num"]]
+        assert db.get_order(pickup_order["num"])["fulfill_status"] == "fulfilled"
+
+    def test_mark_slips_printed_batch(self, client, pickup_order, dropship_order):
+        db.upsert_order(pickup_order)
+        db.upsert_order(dropship_order)
+        resp = client.post("/api/mark_slips_printed",
+                           data=json.dumps({"order_nums": [pickup_order["num"], dropship_order["num"]]}),
+                           content_type="application/json")
+        result = resp.get_json()
+        assert set(result["marked"]) == {pickup_order["num"], dropship_order["num"]}
+        assert db.get_order(pickup_order["num"])["fulfill_status"] == "fulfilled"
+        assert db.get_order(dropship_order["num"])["fulfill_status"] == "fulfilled"
+
+    def test_mark_slips_printed_empty_list(self, client):
+        resp = client.post("/api/mark_slips_printed",
+                           data=json.dumps({"order_nums": []}),
+                           content_type="application/json")
+        assert resp.get_json() == {"ok": True, "marked": []}
+
+
 # ── Poller / system routes ────────────────────────────────────────────────────
 
 class TestSystem:

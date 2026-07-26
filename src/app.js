@@ -289,6 +289,13 @@ async function onDropshipToggle() {
   renderQueue();
 }
 
+function renderPrintAllSlipsButton() {
+  const btn = document.getElementById("btn-print-all-slips");
+  if (!btn) return;
+  const job = currentJob();
+  btn.style.display = (job && job.fulfillment_mode === "in_studio") ? "inline-block" : "none";
+}
+
 function renderQueue() {
   const noJob  = document.getElementById("queue-no-job");
   const content = document.getElementById("queue-content");
@@ -304,6 +311,7 @@ function renderQueue() {
 
   renderDestinationHealthStrip();
   renderDropshipToggle();
+  renderPrintAllSlipsButton();
 
   const tbody = document.getElementById("queue-tbody");
   const threshold = state.unclaimed_threshold;
@@ -383,7 +391,8 @@ function renderQueue() {
     } else if (itemsTotal > 0 && itemsPrinted < itemsTotal) {
       statusHtml = `<span class="status-pill printing">🖨 ${itemsPrinted} of ${itemsTotal} printed</span>`;
     } else if (o.fulfill_status === "fulfilled") {
-      statusHtml = `<span class="status-pill fulfilled">🖨 Printed</span>`;
+      const label = job?.fulfillment_mode === "in_studio" ? "🖨 Slip Printed" : "🖨 Printed";
+      statusHtml = `<span class="status-pill fulfilled">${label}</span>`;
     } else if (isAlert) {
       statusHtml = `<span class="status-pill pending" style="color:var(--red);border-color:rgba(239,68,68,.3)">⚠ Needs Attention</span>`;
     } else {
@@ -397,8 +406,16 @@ function renderQueue() {
       ? `<span style="color:${isAlert?'var(--red)':isWarn?'var(--amber)':'var(--text2)'};font-weight:${isAlert?'700':'400'}">${formatAge(ageMin)}</span>`
       : (o.confirmed_at ? formatAge((new Date(o.confirmed_at)-new Date(o.received_at))/60000) : "—");
 
+    const isInStudio = job?.fulfillment_mode === "in_studio";
+    const slipDone = o.fulfill_status === "fulfilled";
+    const inStudioButtons = (isInStudio && isPending && !slipDone)
+      ? `<button class="btn-xs btn-xs-blue" onclick="event.stopPropagation();printPackingSlip('${esc(o.order_num)}')">🖨 Print Slip</button>
+         <button class="btn-xs btn-xs-ghost" onclick="event.stopPropagation();markSlipPrinted('${esc(o.order_num)}')">✓ Mark Printed</button>`
+      : "";
+
     const actions = isPending
       ? `<div class="queue-actions">
+           ${inStudioButtons}
            <button class="btn-xs btn-xs-blue" onclick="event.stopPropagation();openDetail('${esc(o.order_num)}')">View</button>
          </div>`
       : `<div class="queue-actions">
@@ -584,6 +601,69 @@ async function detailReprintReceipt() {
   if (result.ok) { toast("🧾 Receipt reprinted", "info"); }
   else { toast(`Receipt failed: ${result.error}`, "error"); }
   btn.disabled = false; btn.textContent = "🧾 Reprint Receipt";
+}
+
+// ── Packing slip (in-studio) ────────────────────────────────────────────────
+// Printing is client-side: fetch the PDF, open it in a new tab, and trigger the
+// browser's own print dialog so staff can pick/confirm a printer.
+
+async function fetchPackingSlipPdf(orderNums) {
+  const r = await fetch("/api/packing_slip_pdf", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ order_nums: orderNums }),
+  });
+  if (!r.ok) {
+    let error = "Failed to build packing slip";
+    try { error = (await r.json()).error || error; } catch(e) {}
+    return { ok: false, error };
+  }
+  return { ok: true, blob: await r.blob() };
+}
+
+function openAndPrintPdf(win, blob) {
+  if (!win) { toast("Pop-up blocked — allow pop-ups for this site to print", "error"); return; }
+  win.location = URL.createObjectURL(blob);
+  const tryPrint = () => { try { win.focus(); win.print(); } catch(e) {} };
+  setTimeout(tryPrint, 600);
+  setTimeout(tryPrint, 1500); // fallback in case the PDF viewer wasn't ready yet
+}
+
+async function printPackingSlip(orderNum) {
+  const win = window.open("", "_blank"); // open synchronously on click, before any await
+  const result = await fetchPackingSlipPdf([orderNum]);
+  if (!result.ok) { win?.close(); toast(`Print failed: ${result.error}`, "error"); return; }
+  openAndPrintPdf(win, result.blob);
+  await apiPost("mark_slips_printed", { order_nums: [orderNum] });
+  refreshQueue();
+}
+
+async function markSlipPrinted(orderNum) {
+  const result = await apiPost("mark_slips_printed", { order_nums: [orderNum] });
+  if (result.ok) {
+    toast(`✓ Marked printed: ${orderNum}`, "success");
+    refreshQueue();
+  } else {
+    toast(`Failed: ${result.error || ""}`, "error");
+  }
+}
+
+async function printAllSlips() {
+  if (!state.galleryFilter) return;
+  const pending = state.queue.filter(o => o.fulfillment_mode !== "dropship" && o.fulfill_status !== "fulfilled");
+  if (!pending.length) { toast("No pending orders to print", "info"); return; }
+  const orderNums = pending.map(o => o.order_num);
+
+  const win = window.open("", "_blank"); // open synchronously on click, before any await
+  const btn = document.getElementById("btn-print-all-slips");
+  if (btn) { btn.disabled = true; btn.textContent = "⏳ Building…"; }
+  const result = await fetchPackingSlipPdf(orderNums);
+  if (btn) { btn.disabled = false; btn.textContent = "🖨 Print All Slips"; }
+
+  if (!result.ok) { win?.close(); toast(`Print all failed: ${result.error}`, "error"); return; }
+  openAndPrintPdf(win, result.blob);
+  await apiPost("mark_slips_printed", { order_nums: orderNums });
+  toast(`🖨 Opened ${orderNums.length} packing slip(s)`, "success");
+  refreshQueue();
 }
 
 // ── History ────────────────────────────────────────────────────────────────

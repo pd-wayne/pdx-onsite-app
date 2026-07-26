@@ -1,6 +1,7 @@
 """
 printer.py — ESC/POS receipt printing and image hot folder management
 """
+import io
 import json
 import logging
 import os
@@ -674,3 +675,252 @@ def get_image_path(filename: str, output_folder: str, order_num: str = "") -> Op
         if os.path.exists(p):
             return p
     return None
+
+
+# ── Packing slip (in-studio) ────────────────────────────────────────────────
+
+def locate_downloaded_image(filename: str, destinations: list, order_num: str = "") -> Optional[str]:
+    """Locate an image across every active destination's hot folder (and its
+    archive) — same lookup `get_image_path` does for a single folder, generalized
+    across the multi-destination routing system."""
+    for dest in destinations:
+        folder = dest.get("hot_folder_path", "")
+        if not dest.get("active", True) or not folder:
+            continue
+        path = get_image_path(filename, folder, order_num)
+        if path:
+            return path
+    return None
+
+
+def _parse_packing_slip_items(order: dict) -> list:
+    """Flatten an order's images_json into packing-slip rows: one per physical
+    print (filename + friendly product name + print_spec)."""
+    try:
+        images = json.loads(order.get("images_json") or "[]")
+    except Exception:
+        images = []
+    return [
+        {
+            "filename":   img.get("filename", ""),
+            "item_desc":  img.get("item_desc", ""),
+            "print_spec": img.get("print_spec", ""),
+        }
+        for img in images
+    ]
+
+
+def _group_items_to_slip_rows(group: dict) -> list:
+    """Flatten a bulk-order group's own items[] (assumed self-contained, each with
+    its own images[]) into slip rows. NOTE: the real PDX bulk-group item shape isn't
+    confirmed against a live sample — if a group's items don't carry images
+    directly, this returns an empty list and the caller falls back to printing the
+    whole order's items on that group's slip."""
+    rows = []
+    for it in group.get("items", []) or []:
+        desc = it.get("description", "")
+        for img in it.get("images", []) or []:
+            rows.append({
+                "filename":   img.get("filename", ""),
+                "item_desc":  desc,
+                "print_spec": img.get("externalId", ""),
+            })
+    return rows
+
+
+PACKING_SLIP_DPI = 200
+PACKING_SLIP_PAGE_W_IN = 8.5
+PACKING_SLIP_PAGE_H_IN = 11.0
+
+
+def _render_packing_slip_pages(order_num: str, header_block: dict, items: list, thumb_paths: dict,
+                               studio_name: str = "", gallery: str = "",
+                               placed_at: str = "", status: str = "") -> list:
+    """
+    Render a packing slip as one or more RGB PIL pages at standard letter size.
+    Pure rendering — no printer/OS dependency, works on any platform. The result
+    becomes a PDF (build_packing_slips_pdf) that a staff member opens and prints
+    via their browser's own print dialog, so they can pick/confirm the printer.
+    Paginates if items overflow one page.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    dpi = PACKING_SLIP_DPI
+    pw = int(PACKING_SLIP_PAGE_W_IN * dpi)
+    ph = int(PACKING_SLIP_PAGE_H_IN * dpi)
+    pad = max(20, int(pw * 0.04))
+
+    def _pt(points):
+        return max(10, int(dpi * points / 72))
+
+    try:
+        f_title = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _pt(16))
+        f_label = ImageFont.truetype("C:/Windows/Fonts/arial.ttf",   _pt(9))
+        f_body  = ImageFont.truetype("C:/Windows/Fonts/arial.ttf",   _pt(10))
+        f_bold  = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _pt(10))
+    except Exception:
+        f_title = f_label = f_body = f_bold = ImageFont.load_default()
+
+    lh_title = int(_pt(16) * 1.3)
+    lh_body  = int(_pt(10) * 1.4)
+    lh_label = int(_pt(9)  * 1.3)
+    gap      = max(6, lh_body // 3)
+    thumb_size = int(dpi * 1.0)  # 1" square thumbnails
+    row_h = thumb_size + gap * 2
+
+    pages = []
+    img = Image.new("RGB", (pw, ph), "white")
+    draw = ImageDraw.Draw(img)
+    y = pad
+
+    def ensure_space(needed):
+        nonlocal img, draw, y
+        if y + needed > ph - pad:
+            pages.append(img)
+            img = Image.new("RGB", (pw, ph), "white")
+            draw = ImageDraw.Draw(img)
+            y = pad
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    draw.text((pad, y), "PACKING SLIP", font=f_title, fill="black"); y += lh_title
+    if studio_name:
+        draw.text((pad, y), studio_name, font=f_body, fill="#555555"); y += lh_body
+    draw.text((pad, y), f"Order #{order_num}", font=f_bold, fill="black"); y += lh_body
+    if status:
+        draw.text((pad, y), f"Status: {status}", font=f_label, fill="#888888"); y += lh_label
+    if gallery:
+        draw.text((pad, y), f"Gallery: {gallery}", font=f_label, fill="#888888"); y += lh_label
+    if placed_at:
+        draw.text((pad, y), f"Date: {_fmt_dt(placed_at)}", font=f_label, fill="#888888"); y += lh_label
+    y += gap
+    draw.line([(pad, y), (pw - pad, y)], fill="#cccccc", width=2)
+    y += gap * 2
+
+    # ── Customer info or bulk-group fields ─────────────────────────────────────
+    if header_block.get("group_label"):
+        draw.text((pad, y), header_block["group_label"], font=f_bold, fill="black")
+        y += lh_body
+        for f in header_block.get("fields", []):
+            draw.text((pad, y), f"{f.get('label', '')}: {f.get('value', '')}", font=f_body, fill="black")
+            y += lh_body
+    else:
+        draw.text((pad, y), header_block.get("customer", "Unknown"), font=f_bold, fill="black")
+        y += lh_body
+        for line in header_block.get("address", []):
+            draw.text((pad, y), line, font=f_label, fill="#555555"); y += lh_label
+        if header_block.get("email"):
+            draw.text((pad, y), header_block["email"], font=f_label, fill="#555555"); y += lh_label
+        if header_block.get("phone"):
+            draw.text((pad, y), header_block["phone"], font=f_label, fill="#555555"); y += lh_label
+    y += gap
+    draw.line([(pad, y), (pw - pad, y)], fill="#cccccc", width=2)
+    y += gap * 2
+
+    # ── Items ───────────────────────────────────────────────────────────────────
+    draw.text((pad, y), f"ITEMS ({len(items)})", font=f_label, fill="#888888")
+    y += lh_label + gap
+
+    for it in items:
+        ensure_space(row_h)
+        thumb_path = thumb_paths.get(it.get("filename", ""))
+        if thumb_path:
+            try:
+                thumb = Image.open(thumb_path)
+                thumb.thumbnail((thumb_size, thumb_size))
+                tx = pad
+                ty = y + (thumb_size - thumb.size[1]) // 2
+                img.paste(thumb, (tx, ty))
+            except Exception as e:
+                log.warning(f"[Packing Slip] Thumbnail failed for {it.get('filename')}: {e}")
+        text_x = pad + thumb_size + gap * 2
+        draw.text((text_x, y + gap), it.get("item_desc") or "—", font=f_bold, fill="black")
+        draw.text((text_x, y + gap + lh_body), it.get("filename", ""), font=f_label, fill="#888888")
+        y += row_h
+
+    pages.append(img)
+    return pages
+
+
+def build_packing_slip_pages(order: dict, destinations: list, studio_name: str = "") -> list:
+    """
+    Build the packing-slip page images for one order. Bulk orders (isBulkOrder=True
+    in the raw PDX payload) get one slip section per groups[] entry, each showing
+    that group's fields (Name/Grade/Teacher, etc.) instead of customer info.
+    Standard orders get a single slip section. Returns a flat list of RGB pages —
+    concatenate across orders and pass to build_packing_slips_pdf() for one
+    combined multi-page PDF (one print dialog for a whole batch).
+    """
+    order_num = order.get("order_num", "")
+    gallery   = order.get("gallery", "")
+    placed_at = order.get("placed_at", "")
+    status    = order.get("status", "")
+
+    try:
+        raw = json.loads(order.get("raw_json") or "{}")
+    except Exception:
+        raw = {}
+
+    parsed_items = _parse_packing_slip_items(order)
+    thumb_paths = {
+        it["filename"]: locate_downloaded_image(it["filename"], destinations, order_num)
+        for it in parsed_items if it.get("filename")
+    }
+
+    if raw.get("isBulkOrder") and raw.get("groups"):
+        pages = []
+        for group in raw["groups"]:
+            fields = group.get("fields", [])
+            group_label = " / ".join(
+                str(f.get("value", "")) for f in fields if f.get("value")
+            ) or "Group"
+            group_rows = _group_items_to_slip_rows(group)
+            if not group_rows:
+                log.warning(f"[Packing Slip] {order_num}: group had no embedded item "
+                            f"images — printing full order item list on this slip instead")
+                group_rows = parsed_items
+            pages.extend(_render_packing_slip_pages(
+                order_num, {"group_label": group_label, "fields": fields},
+                group_rows, thumb_paths, studio_name,
+                gallery=gallery, placed_at=placed_at, status=status,
+            ))
+        return pages
+
+    shipping    = raw.get("shipping", {}) or {}
+    destination = shipping.get("destination", {}) or {}
+    address_lines = []
+    city_line = ", ".join(p for p in [destination.get("city", ""), destination.get("state", "")] if p)
+    if city_line or destination.get("zipCode"):
+        address_lines.append(f"{city_line} {destination.get('zipCode', '')}".strip())
+
+    header_block = {
+        "customer": order.get("customer_name", "Unknown"),
+        "address":  address_lines,
+        "email":    destination.get("email", ""),
+        "phone":    order.get("customer_phone", "") or destination.get("phone", ""),
+    }
+    return _render_packing_slip_pages(
+        order_num, header_block, parsed_items, thumb_paths, studio_name,
+        gallery=gallery, placed_at=placed_at, status=status,
+    )
+
+
+def build_packing_slips_pdf(orders: list, destinations: list, studio_name: str = "") -> bytes:
+    """Build one combined multi-page PDF across one or more orders — a single
+    print dialog covers the whole batch, whether it's one slip or fifty."""
+    from PIL import Image
+
+    all_pages = []
+    for order in orders:
+        all_pages.extend(build_packing_slip_pages(order, destinations, studio_name))
+
+    if not all_pages:
+        blank_w = int(PACKING_SLIP_PAGE_W_IN * PACKING_SLIP_DPI)
+        blank_h = int(PACKING_SLIP_PAGE_H_IN * PACKING_SLIP_DPI)
+        all_pages = [Image.new("RGB", (blank_w, blank_h), "white")]
+
+    buf = io.BytesIO()
+    all_pages[0].save(
+        buf, format="PDF", save_all=True, append_images=all_pages[1:],
+        resolution=PACKING_SLIP_DPI,
+    )
+    return buf.getvalue()

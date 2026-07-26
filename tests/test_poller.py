@@ -8,8 +8,10 @@ orders.fulfillment_mode.  These tests exercise that classification via the DB la
 import json
 import os
 import tempfile
+import threading
 import pytest
 
+import api as pdx_api
 import config
 import db
 import poller as poller_module
@@ -159,3 +161,84 @@ class TestDropshipImageDownload:
         p._download_dropship_images("DS002", images, api_key="fake")
 
         assert results == [("DS002", True, "")]
+
+
+# ── In-studio routing (Phase 6) ───────────────────────────────────────────────
+# In-studio pickup orders now get the exact same hot-folder/product-routing
+# treatment onsite orders do — the only thing that stays onsite-only is the
+# receipt. A packing slip is printed on-demand instead (see server.py).
+
+class _SyncThread:
+    """Runs the target synchronously instead of spawning a real thread, so
+    _do_poll's fire-and-forget download threads are deterministic in tests."""
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        self._target(*self._args, **self._kwargs)
+
+
+class TestInStudioRouting:
+    def _poll_one_order(self, monkeypatch, order_data, job_mode):
+        monkeypatch.setattr(threading, "Thread", _SyncThread)
+        monkeypatch.setattr(config, "load", lambda: {"print_mode": "auto"})
+        monkeypatch.setattr(pdx_api, "poll_orders", lambda lab_id, api_key: ([order_data], None))
+
+        receipt_calls = []
+        monkeypatch.setattr(poller_module.Poller, "_print_receipt",
+                            lambda self, *a, **k: receipt_calls.append(a))
+
+        download_calls = []
+        monkeypatch.setattr(printer, "download_images",
+                            lambda images, folder, order_num="", api_key="":
+                                (download_calls.append(order_num) or (True, "")))
+
+        gallery = order_data["gallery"]
+        db.upsert_job(gallery, default_mode=job_mode)
+        db.seed_default_destination("/tmp/hotfolder")
+
+        p = poller_module.Poller()
+        p.lab_id = "lab"
+        p.api_key = "key"
+        p._do_poll()
+
+        return receipt_calls, download_calls
+
+    def test_in_studio_pickup_order_gets_routed_download_no_receipt(self, monkeypatch, pickup_order):
+        receipt_calls, download_calls = self._poll_one_order(monkeypatch, pickup_order, "in_studio")
+
+        assert receipt_calls == []
+        assert pickup_order["num"] in download_calls
+        items = db.get_order_items(pickup_order["num"])
+        assert len(items) >= 1
+
+    def test_onsite_pickup_order_still_gets_receipt(self, monkeypatch, pickup_order):
+        receipt_calls, download_calls = self._poll_one_order(monkeypatch, pickup_order, "onsite")
+
+        assert len(receipt_calls) == 1
+        assert pickup_order["num"] in download_calls
+
+    def test_in_studio_dropship_order_gets_no_receipt_no_slip(self, monkeypatch, dropship_order):
+        # Dropship handling is identical regardless of job_mode — this just confirms
+        # an in_studio job doesn't change that path.
+        monkeypatch.setattr(threading, "Thread", _SyncThread)
+        monkeypatch.setattr(config, "load", lambda: {"print_mode": "auto", "image_output_folder": "/tmp/hot"})
+        monkeypatch.setattr(pdx_api, "poll_orders", lambda lab_id, api_key: ([dropship_order], None))
+
+        receipt_calls = []
+        monkeypatch.setattr(poller_module.Poller, "_print_receipt",
+                            lambda self, *a, **k: receipt_calls.append(a))
+        monkeypatch.setattr(printer, "download_images", lambda *a, **k: (True, ""))
+
+        gallery = dropship_order["gallery"]
+        db.upsert_job(gallery, default_mode="in_studio")
+
+        p = poller_module.Poller()
+        p.lab_id = "lab"
+        p.api_key = "key"
+        p._do_poll()
+
+        assert receipt_calls == []
+        assert db.get_order(dropship_order["num"])["download_status"] == "ok"

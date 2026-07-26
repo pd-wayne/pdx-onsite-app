@@ -397,6 +397,41 @@ def create_app(poller, ui_path: str) -> Flask:
         push_event("order_fulfilled", {"order_num": order_num})
         return jsonify({"ok": True})
 
+    # ── Packing slip (in-studio) ────────────────────────────────────────────────
+    # Printing itself now happens client-side: the browser opens the PDF this
+    # builds and shows its own print dialog, so staff can pick/confirm a printer.
+    # These endpoints only build the document and record that it was handled.
+
+    @app.route("/api/packing_slip_pdf", methods=["POST"])
+    def packing_slip_pdf():
+        data = request.get_json() or {}
+        order_nums = data.get("order_nums", [])
+        if not order_nums:
+            return jsonify({"ok": False, "error": "No orders specified"}), 400
+
+        orders = [db.get_order(n) for n in order_nums]
+        orders = [o for o in orders if o]
+        if not orders:
+            return jsonify({"ok": False, "error": "Order(s) not found"}), 404
+
+        cfg = config.load()
+        destinations = db.get_destinations()
+        pdf_bytes = printer.build_packing_slips_pdf(orders, destinations, cfg.get("studio_name", ""))
+        return Response(pdf_bytes, mimetype="application/pdf")
+
+    @app.route("/api/mark_slips_printed", methods=["POST"])
+    def mark_slips_printed():
+        data = request.get_json() or {}
+        order_nums = data.get("order_nums", [])
+        marked = []
+        for order_num in order_nums:
+            if db.set_fulfilled(order_num):
+                marked.append(order_num)
+        if marked:
+            _log(f"🖨 Packing slip{'s' if len(marked) != 1 else ''} marked printed: {', '.join(marked)}")
+            push_event("order_fulfilled", {"order_num": marked[0] if len(marked) == 1 else None, "batch": len(marked) > 1})
+        return jsonify({"ok": True, "marked": marked})
+
     @app.route("/api/reprint_receipt", methods=["POST"])
     def reprint_receipt():
         data = request.get_json()

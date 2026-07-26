@@ -109,15 +109,20 @@ class Poller:
             job_mode   = job["fulfillment_mode"] if job else cfg.get("app_mode", "onsite")
             order_mode = order["fulfillment_mode"] if order else "pickup"
 
-            # In-studio orders are handled by the packing slip workflow (Phase 6).
-            if job_mode != "onsite":
-                log.info(f"[Poller] {order_num} ingested ({job_mode}/{order_mode}) — no receipt/download")
+            if job_mode not in ("onsite", "in_studio"):
+                log.info(f"[Poller] {order_num} ingested (unknown job_mode={job_mode}) — no receipt/download")
                 continue
 
             if order_mode == "pickup":
-                self._print_receipt(order_num, order_data)
+                # Receipt only makes sense onsite — a customer is there to hand it to.
+                # In-studio orders get a packing slip instead, printed on staff action
+                # (see server.py: /api/print_packing_slip, /api/mark_slip_printed).
+                if job_mode == "onsite":
+                    self._print_receipt(order_num, order_data)
 
-                # In manual mode the operator triggers download via "Send to Printer"
+                # Routing/download runs for BOTH onsite and in_studio pickup orders —
+                # same hot-folder/product-routing engine either way. In manual mode
+                # the operator triggers download via "Send to Printer" instead.
                 if cfg.get("print_mode", "auto") != "manual":
                     images   = db.get_images_json(order_num)
                     order_id = order["id"] if order else None
@@ -128,10 +133,11 @@ class Poller:
                     )
                     t.start()
             else:
-                # Dropship on an onsite job: no receipt (no one's there to hand it to), and
-                # images must NOT land in the routed hot folders (that would trigger DNP
-                # auto-print). Fetch them into a separate dropship/ folder so the studio can
-                # print manually on their own schedule.
+                # Dropship (regardless of onsite/in_studio): no receipt/slip (no one's
+                # there to hand it to, and it's not a packable in-studio item either),
+                # and images must NOT land in the routed hot folders (that would
+                # trigger DNP auto-print). Fetch them into a separate dropship/ folder
+                # so the studio can print manually on their own schedule.
                 images = db.get_images_json(order_num)
                 t = threading.Thread(
                     target=self._download_dropship_images,
