@@ -314,3 +314,76 @@ class TestInStudioRouting:
 
         assert receipt_calls == []
         assert db.get_order(dropship_order["num"])["download_status"] == "ok"
+
+
+# ── Hot-folder print-consumption detection ─────────────────────────────────────
+# Landing in the hot folder only means DNP picked up the job — it does NOT mean
+# it printed. An order should only flip to 'ready' once the file has actually
+# disappeared from the folder (the printer consumed it), never just because the
+# download succeeded. This is what a disconnected/out-of-paper printer exposed.
+
+class TestCheckPendingPrints:
+    def _setup_order_with_items(self, pickup_order, tmp_path, n=2):
+        hot_folder = str(tmp_path / "Hot")
+        os.makedirs(hot_folder, exist_ok=True)
+        dest_id = db.upsert_destination("A", hot_folder, is_default=True)
+        db.upsert_order(pickup_order)
+        order = db.get_order(pickup_order["num"])
+        item_ids = []
+        for i in range(n):
+            fname = f"img{i}.jpg"
+            open(os.path.join(hot_folder, fname), "wb").close()  # simulate a real downloaded file
+            item_ids.append(db.insert_order_item(order["id"], fname, "8x24", dest_id))
+        return order, item_ids, hot_folder
+
+    def test_file_still_present_stays_queued_no_ready_callback(self, pickup_order, tmp_path):
+        order, item_ids, hot_folder = self._setup_order_with_items(pickup_order, tmp_path, n=1)
+        ready_calls = []
+        p = poller_module.Poller(on_order_ready=lambda num: ready_calls.append(num))
+
+        p._check_pending_prints()
+
+        assert db.get_order_items(pickup_order["num"])[0]["status"] == "queued"
+        assert db.get_order(pickup_order["num"])["status"] == "received"
+        assert ready_calls == []
+
+    def test_file_consumed_marks_printed_and_fires_ready(self, pickup_order, tmp_path):
+        order, item_ids, hot_folder = self._setup_order_with_items(pickup_order, tmp_path, n=1)
+        os.remove(os.path.join(hot_folder, "img0.jpg"))  # simulate the printer consuming it
+        ready_calls = []
+        p = poller_module.Poller(on_order_ready=lambda num: ready_calls.append(num))
+
+        p._check_pending_prints()
+
+        assert db.get_order_items(pickup_order["num"])[0]["status"] == "printed"
+        assert db.get_order(pickup_order["num"])["status"] == "ready"
+        assert ready_calls == [pickup_order["num"]]
+
+    def test_partial_consumption_does_not_promote_order_yet(self, pickup_order, tmp_path):
+        order, item_ids, hot_folder = self._setup_order_with_items(pickup_order, tmp_path, n=2)
+        os.remove(os.path.join(hot_folder, "img0.jpg"))  # only one of two consumed
+        ready_calls = []
+        p = poller_module.Poller(on_order_ready=lambda num: ready_calls.append(num))
+
+        p._check_pending_prints()
+
+        items = {i["filename"]: i["status"] for i in db.get_order_items(pickup_order["num"])}
+        assert items["img0.jpg"] == "printed"
+        assert items["img1.jpg"] == "queued"
+        assert db.get_order(pickup_order["num"])["status"] == "received"
+        assert ready_calls == []
+
+    def test_no_pending_items_is_a_noop(self):
+        p = poller_module.Poller()
+        p._check_pending_prints()  # should not raise
+
+    def test_destination_without_hot_folder_path_is_skipped_gracefully(self, pickup_order, tmp_path):
+        db.upsert_order(pickup_order)
+        order = db.get_order(pickup_order["num"])
+        dest_id = db.upsert_destination("No Path", "")
+        db.insert_order_item(order["id"], "img0.jpg", "8x24", dest_id)
+
+        p = poller_module.Poller()
+        p._check_pending_prints()  # should not raise
+
+        assert db.get_order_items(pickup_order["num"])[0]["status"] == "queued"

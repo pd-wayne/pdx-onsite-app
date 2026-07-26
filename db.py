@@ -722,6 +722,20 @@ def get_order_items(order_num: str) -> list:
         return _get_items_by_order_id(conn, row["id"])
 
 
+def get_pending_order_items() -> list:
+    """Order items still sitting in their hot folder, not yet confirmed printed —
+    joined with orders for order_num so the caller can promote readiness once
+    a given order's items have all been consumed by the printer."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT oi.id, oi.filename, oi.destination_id, o.order_num
+            FROM order_items oi
+            JOIN orders o ON oi.order_id = o.id
+            WHERE oi.status = 'queued'
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+
 def check_order_ready(order_num: str) -> bool:
     """
     If every order_item for this order is 'printed', promote order status to 'ready'.

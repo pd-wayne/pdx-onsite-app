@@ -211,7 +211,7 @@ body{display:flex;flex-direction:column}
 .status-pill.pending{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245,166,35,.2)}
 .status-pill.fulfilled{background:rgba(79,142,247,.1);color:var(--accent);border:1px solid rgba(79,142,247,.2)}
 .status-pill.confirmed{background:var(--green-bg);color:var(--green);border:1px solid rgba(14,203,129,.2)}
-.status-pill.ready{background:var(--green-bg);color:var(--green);border:1px solid rgba(14,203,129,.2)}
+.status-pill.ready{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245,166,35,.2)}
 .status-pill.printing{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245,166,35,.2)}
 
 /* ── Bulk order tag ─────────────────────────────────────────────────────── */
@@ -396,7 +396,7 @@ body{display:flex;flex-direction:column}
 .detail-status-badge.pending{background:var(--bg3);color:var(--text3);border:1px solid var(--border)}
 .detail-status-badge.fulfilled{background:var(--green-bg);color:var(--green);border:1px solid rgba(14,203,129,.2)}
 .detail-status-badge.confirmed{background:rgba(79,142,247,.1);color:var(--accent);border:1px solid rgba(79,142,247,.2)}
-.detail-status-badge.ready{background:var(--green-bg);color:var(--green);border:1px solid rgba(14,203,129,.2)}
+.detail-status-badge.ready{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245,166,35,.2)}
 .btn-action{
   width:100%;padding:11px;font-size:13px;font-weight:700;font-family:var(--font);
   border:none;border-radius:var(--radius);cursor:pointer;transition:all var(--transition);

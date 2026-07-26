@@ -274,7 +274,7 @@ def _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
 
         def two_col(label, value, y, val_font=None):
             vf = val_font or f_bold
-            draw.text((pad, y), label, fill="#888888", font=f_body)
+            draw.text((pad, y), label, fill="#333333", font=f_body)
             draw.text((pw - pad - tw(value, vf), y), value, fill="black", font=vf)
 
         def dashed_sep(y):
@@ -311,10 +311,10 @@ def _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
         if studio_name:
             centered(studio_name.upper(), y, f_large)
             y += lh_large
-        centered("PICKUP RECEIPT", y, f_small, fill="#888888")
+        centered("PICKUP RECEIPT", y, f_small, fill="#333333")
         y += lh_small
         if placed_at:
-            centered(_fmt_dt(placed_at), y, f_small, fill="#aaaaaa")
+            centered(_fmt_dt(placed_at), y, f_small, fill="#333333")
             y += lh_small
         y += gap
         dashed_sep(y)
@@ -325,7 +325,7 @@ def _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
         label_text = "ORDER NUMBER"
         box_h = inner_pad + lh_small + gap // 2 + lh_large + inner_pad
         dashed_rect(pad, y, pw - pad, y + box_h)
-        centered(label_text, y + inner_pad, f_small, fill="#888888")
+        centered(label_text, y + inner_pad, f_small, fill="#333333")
         centered(order_num, y + inner_pad + lh_small + gap // 2, f_large)
         y += box_h
         y += gap
@@ -344,7 +344,7 @@ def _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
 
         # ── Items ─────────────────────────────────────────────────────────────
         if items:
-            draw.text((pad, y), "ITEMS", fill="#888888", font=f_small)
+            draw.text((pad, y), "ITEMS", fill="#333333", font=f_small)
             y += lh_small + gap // 2
             shown = set()
             for i, it in enumerate(items):
@@ -360,14 +360,14 @@ def _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
                     if fname not in shown:
                         shown.add(fname)
                         fn = fit_text(fname, f_small, pw - pad * 2 - 16)
-                        draw.text((pad + 16, y), fn, fill="#aaaaaa", font=f_small)
+                        draw.text((pad + 16, y), fn, fill="#333333", font=f_small)
                         y += lh_small
             y += gap
             dashed_sep(y)
             y += lh_small + gap
 
         # ── QR code ───────────────────────────────────────────────────────────
-        centered("Scan to confirm pickup", y, f_small, fill="#888888")
+        centered("Scan to confirm pickup", y, f_small, fill="#333333")
         y += lh_small + gap
         img.paste(qr_img, (max(0, (pw - qr_size) // 2), y))
         y += qr_size + gap
@@ -661,6 +661,16 @@ def download_images(images: list, output_folder: str, order_num: str = "", api_k
     if errors:
         return False, "; ".join(errors)
     return True, ""
+
+
+def file_still_in_hot_folder(filename: str, hot_folder_path: str) -> bool:
+    """True if the file is still sitting in the hot folder root — i.e. not yet
+    consumed by the printer. DNP-style watched-folder printers remove/consume
+    the file once printed, so its disappearance is the actual proof-of-print
+    signal — successfully copying the file there only means it's queued."""
+    if not hot_folder_path or not filename:
+        return False
+    return os.path.exists(os.path.join(hot_folder_path, filename))
 
 
 def get_image_path(filename: str, output_folder: str, order_num: str = "") -> Optional[str]:

@@ -576,3 +576,42 @@ class TestCheckOrderReady:
         after = db.get_order_items("GS1777844776")[0]
         assert after["printed_at"] is not None
         assert after["status"] == "printed"
+
+
+# ── get_pending_order_items ────────────────────────────────────────────────────
+# Backs the hot-folder consumption check: only 'queued' items (still sitting in
+# their hot folder, not yet confirmed printed) should surface here.
+
+class TestGetPendingOrderItems:
+    def _setup_order_with_items(self, fresh_db, pickup_order, n=2):
+        dest_id = db.upsert_destination("A", "C:\\A")
+        db.upsert_order(pickup_order)
+        order = db.get_order("GS1777844776")
+        item_ids = [
+            db.insert_order_item(order["id"], f"img{i}.jpg", "8x24", dest_id)
+            for i in range(n)
+        ]
+        return order, item_ids, dest_id
+
+    def test_empty_when_no_order_items(self, fresh_db):
+        assert db.get_pending_order_items() == []
+
+    def test_returns_queued_items_with_order_num(self, fresh_db, pickup_order):
+        order, item_ids, dest_id = self._setup_order_with_items(fresh_db, pickup_order, n=2)
+        pending = db.get_pending_order_items()
+        assert len(pending) == 2
+        assert all(p["order_num"] == "GS1777844776" for p in pending)
+        assert all(p["destination_id"] == dest_id for p in pending)
+        assert {p["filename"] for p in pending} == {"img0.jpg", "img1.jpg"}
+
+    def test_excludes_printed_items(self, fresh_db, pickup_order):
+        order, item_ids, dest_id = self._setup_order_with_items(fresh_db, pickup_order, n=2)
+        db.update_item_status(item_ids[0], "printed")
+        pending = db.get_pending_order_items()
+        assert len(pending) == 1
+        assert pending[0]["filename"] == "img1.jpg"
+
+    def test_excludes_error_items(self, fresh_db, pickup_order):
+        order, item_ids, dest_id = self._setup_order_with_items(fresh_db, pickup_order, n=1)
+        db.update_item_status(item_ids[0], "error")
+        assert db.get_pending_order_items() == []

@@ -67,7 +67,38 @@ class Poller:
                 self._do_poll()
                 with self._lock:
                     self.next_poll_at = time.time() + self.interval
+            try:
+                self._check_pending_prints()
+            except Exception as e:
+                log.warning(f"[PrintCheck] {e}")
             time.sleep(1)
+
+    def _check_pending_prints(self):
+        """Detect when a hot-folder file has actually been consumed (printed) by
+        the physical printer — its disappearance from the destination folder is
+        the real proof-of-print signal, not just having successfully copied it
+        there. Runs every tick since the check is cheap and gives near-instant
+        'ready for pickup' feedback once a DNP-style printer picks up the file."""
+        pending = db.get_pending_order_items()
+        if not pending:
+            return
+
+        destinations = {d["id"]: d for d in db.get_destinations()}
+        ready_orders = set()
+
+        for item in pending:
+            dest = destinations.get(item["destination_id"])
+            if not dest or not dest.get("hot_folder_path"):
+                continue
+            if not printer.file_still_in_hot_folder(item["filename"], dest["hot_folder_path"]):
+                db.update_item_status(item["id"], "printed")
+                ready_orders.add(item["order_num"])
+
+        for order_num in ready_orders:
+            if db.check_order_ready(order_num):
+                log.info(f"[PrintCheck] {order_num} → ready for pickup")
+                if self.on_order_ready:
+                    self.on_order_ready(order_num)
 
     def _do_poll(self):
         with self._lock:
@@ -246,9 +277,11 @@ class Poller:
             ok, err = printer.download_images(imgs, folder, order_num=order_num, api_key=api_key)
 
             if ok:
-                if order_id is not None:
-                    for item_id in item_ids_by_dest[dest_id]:
-                        db.update_item_status(item_id, "printed")
+                # NOTE: items stay 'queued' here, not 'printed' — landing in the
+                # hot folder only means DNP has picked up the job, not that it's
+                # actually printed. _check_pending_prints() promotes to 'printed'
+                # (and the order to 'ready') once the file disappears from the
+                # folder, which is the real proof a hot-folder printer consumed it.
                 db.update_destination_health(dest_id)
                 log.info(f"[Download] {len(imgs)} image(s) → '{dest['name']}' ({folder})")
             else:
@@ -261,10 +294,6 @@ class Poller:
 
         if overall_ok:
             db.set_download_status(order_num, "ok")
-            if order_id is not None and db.check_order_ready(order_num):
-                log.info(f"[Download] {order_num} → ready for pickup")
-                if self.on_order_ready:
-                    self.on_order_ready(order_num)
         else:
             db.set_download_status(order_num, "failed", overall_err)
 

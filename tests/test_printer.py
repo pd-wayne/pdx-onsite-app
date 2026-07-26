@@ -37,6 +37,26 @@ class TestParsePackingSlipItems:
         assert printer._parse_packing_slip_items({"images_json": "not json"}) == []
 
 
+# ── file_still_in_hot_folder ───────────────────────────────────────────────────────
+# The proof-of-print signal for hot-folder printing: landing in the folder only
+# means DNP picked up the job, not that it printed. Disappearance is the real
+# signal a physical printer (not just the file copy) consumed it.
+
+class TestFileStillInHotFolder:
+    def test_true_when_file_present(self, tmp_path):
+        (tmp_path / "photo.jpg").write_bytes(b"fake")
+        assert printer.file_still_in_hot_folder("photo.jpg", str(tmp_path)) is True
+
+    def test_false_when_file_absent(self, tmp_path):
+        assert printer.file_still_in_hot_folder("missing.jpg", str(tmp_path)) is False
+
+    def test_false_when_no_hot_folder_path(self):
+        assert printer.file_still_in_hot_folder("photo.jpg", "") is False
+
+    def test_false_when_no_filename(self, tmp_path):
+        assert printer.file_still_in_hot_folder("", str(tmp_path)) is False
+
+
 # ── locate_downloaded_image ───────────────────────────────────────────────────────
 
 class TestLocateDownloadedImage:
