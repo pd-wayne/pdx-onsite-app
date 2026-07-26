@@ -4,6 +4,7 @@ test_server.py — Flask route integration tests.
 Uses Flask's test client with an isolated DB and mock poller.
 Every test gets a fresh DB via the `client` fixture in conftest.py.
 """
+import io
 import json
 import pytest
 import db
@@ -86,6 +87,35 @@ class TestSettings:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["ok"] is False
+
+
+# ── Logo upload ────────────────────────────────────────────────────────────────
+
+class TestUploadLogo:
+    def test_accepts_small_file(self, client, tmp_path, monkeypatch):
+        # upload_logo() saves via config._app_dir() (a plain filesystem path, not
+        # CONFIG_PATH) — must isolate it too or the test writes into the real repo.
+        import config as _config
+        monkeypatch.setattr(_config, "_app_dir", lambda: str(tmp_path))
+
+        data = {"file": (io.BytesIO(b"\x89PNG\r\n" + b"x" * 100), "logo.png")}
+        resp = client.post("/api/upload_logo", data=data, content_type="multipart/form-data")
+        assert resp.get_json()["ok"] is True
+        assert (tmp_path / "studio_logo.png").exists()
+
+    def test_rejects_oversized_file(self, client):
+        import server
+        oversized = b"x" * (server.MAX_LOGO_SIZE_BYTES + 1)
+        data = {"file": (io.BytesIO(oversized), "logo.png")}
+        resp = client.post("/api/upload_logo", data=data, content_type="multipart/form-data")
+        result = resp.get_json()
+        assert result["ok"] is False
+        assert "5MB" in result["error"]
+
+    def test_rejects_unsupported_extension(self, client):
+        data = {"file": (io.BytesIO(b"not an image"), "logo.gif")}
+        resp = client.post("/api/upload_logo", data=data, content_type="multipart/form-data")
+        assert resp.get_json()["ok"] is False
 
 
 # ── Queue ─────────────────────────────────────────────────────────────────────

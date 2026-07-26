@@ -482,6 +482,16 @@ def get_order_archive_path(output_folder: str, order_num: str) -> str:
     return os.path.join(get_archive_folder(output_folder), order_num)
 
 
+def get_dropship_folder(output_folder: str) -> str:
+    return os.path.join(output_folder, "dropship")
+
+
+def get_order_dropship_path(output_folder: str, order_num: str) -> str:
+    """Where a dropship order's images are fetched to — never the hot folder root,
+    so DNP's watched folder never sees them and never auto-prints."""
+    return os.path.join(get_dropship_folder(output_folder), order_num)
+
+
 def fulfill_to_hot_folder(images: list, output_folder: str, order_num: str = "") -> tuple[bool, str]:
     """Move images from hot folder root to archive/ORDER_NUM/ subfolder."""
     if not output_folder:

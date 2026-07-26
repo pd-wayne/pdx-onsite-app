@@ -109,25 +109,37 @@ class Poller:
             job_mode   = job["fulfillment_mode"] if job else cfg.get("app_mode", "onsite")
             order_mode = order["fulfillment_mode"] if order else "pickup"
 
-            # Only pickup orders on onsite jobs get a receipt and auto-download.
-            # Dropship orders on onsite jobs are stored only.
             # In-studio orders are handled by the packing slip workflow (Phase 6).
-            if job_mode != "onsite" or order_mode != "pickup":
+            if job_mode != "onsite":
                 log.info(f"[Poller] {order_num} ingested ({job_mode}/{order_mode}) — no receipt/download")
                 continue
 
-            self._print_receipt(order_num, order_data)
+            if order_mode == "pickup":
+                self._print_receipt(order_num, order_data)
 
-            # In manual mode the operator triggers download via "Send to Printer"
-            if cfg.get("print_mode", "auto") != "manual":
-                images   = db.get_images_json(order_num)
-                order_id = order["id"] if order else None
+                # In manual mode the operator triggers download via "Send to Printer"
+                if cfg.get("print_mode", "auto") != "manual":
+                    images   = db.get_images_json(order_num)
+                    order_id = order["id"] if order else None
+                    t = threading.Thread(
+                        target=self._download_images,
+                        args=(order_num, order_id, images, api_key),
+                        daemon=True
+                    )
+                    t.start()
+            else:
+                # Dropship on an onsite job: no receipt (no one's there to hand it to), and
+                # images must NOT land in the routed hot folders (that would trigger DNP
+                # auto-print). Fetch them into a separate dropship/ folder so the studio can
+                # print manually on their own schedule.
+                images = db.get_images_json(order_num)
                 t = threading.Thread(
-                    target=self._download_images,
-                    args=(order_num, order_id, images, api_key),
+                    target=self._download_dropship_images,
+                    args=(order_num, images, api_key),
                     daemon=True
                 )
                 t.start()
+                log.info(f"[Poller] {order_num} dropship — fetching for manual handling (no receipt/auto-print)")
 
         log.info(f"[Poller] Poll complete — {new_count} new order(s)")
 
@@ -252,6 +264,37 @@ class Poller:
 
         if self.on_download_done:
             self.on_download_done(order_num, overall_ok, overall_err)
+
+    def _download_dropship_images(self, order_num: str, images: list, api_key: str):
+        """Fetch a dropship order's images into a dropship/ORDER_NUM/ folder for the
+        studio to print manually — never into a routed hot folder (no auto-print)."""
+        if not images:
+            db.set_download_status(order_num, "ok")
+            if self.on_download_done:
+                self.on_download_done(order_num, True, "")
+            return
+
+        cfg = config.load()
+        output_folder = cfg.get("image_output_folder", "")
+        if not output_folder:
+            err = "No image output folder configured"
+            log.warning(f"[Dropship] {err} — skipping {order_num}")
+            db.set_download_status(order_num, "failed", err)
+            if self.on_download_done:
+                self.on_download_done(order_num, False, err)
+            return
+
+        dropship_folder = printer.get_order_dropship_path(output_folder, order_num)
+        ok, err = printer.download_images(images, dropship_folder, order_num=order_num, api_key=api_key)
+        if ok:
+            db.set_download_status(order_num, "ok")
+            log.info(f"[Dropship] {len(images)} image(s) saved for manual handling: {dropship_folder}")
+        else:
+            db.set_download_status(order_num, "failed", err)
+            log.warning(f"[Dropship] Download failed for {order_num}: {err}")
+
+        if self.on_download_done:
+            self.on_download_done(order_num, ok, err if not ok else "")
 
     def get_status(self) -> dict:
         with self._lock:

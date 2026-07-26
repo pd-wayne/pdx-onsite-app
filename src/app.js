@@ -913,13 +913,22 @@ function updateHotFolderWarning(folder) {
 }
 
 // ── Logo upload ────────────────────────────────────────────────────────────
+const MAX_LOGO_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB — must match server.py's MAX_LOGO_SIZE_BYTES
+
 async function uploadLogo(input) {
   if (!input.files || !input.files[0]) return;
   const statusEl = document.getElementById("logo-upload-status");
+  const file = input.files[0];
+  if (file.size > MAX_LOGO_SIZE_BYTES) {
+    statusEl.textContent = `✗ Logo must be under ${MAX_LOGO_SIZE_BYTES / (1024*1024)}MB`;
+    statusEl.style.color = "var(--red)";
+    input.value = "";
+    return;
+  }
   statusEl.textContent = "Uploading…";
   statusEl.style.color = "var(--text3)";
   const formData = new FormData();
-  formData.append("file", input.files[0]);
+  formData.append("file", file);
   try {
     const r = await fetch("/api/upload_logo", { method: "POST", body: formData });
     const result = await r.json();
@@ -1101,6 +1110,26 @@ function hideUpdateProgress() {
 async function loadDestinations() {
   state.destinations = await apiGet("get_destinations");
   renderDestinations();
+  updateDestinationsVisibility();
+}
+
+function shouldShowDestinationsAdvanced() {
+  if (state.destinations.length > 1) return true;
+  try { return localStorage.getItem("pdx_destinations_expanded") === "1"; } catch(e) { return false; }
+}
+
+function updateDestinationsVisibility() {
+  const collapsed = document.getElementById("destinations-collapsed-prompt");
+  const advanced = document.getElementById("destinations-advanced-wrap");
+  if (!collapsed || !advanced) return;
+  const show = shouldShowDestinationsAdvanced();
+  collapsed.style.display = show ? "none" : "block";
+  advanced.style.display = show ? "block" : "none";
+}
+
+function expandDestinations() {
+  try { localStorage.setItem("pdx_destinations_expanded", "1"); } catch(e) {}
+  updateDestinationsVisibility();
 }
 
 function renderDestinations() {

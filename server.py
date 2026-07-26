@@ -21,6 +21,7 @@ import printer
 log = logging.getLogger("pdx.server")
 _event_queue: queue.Queue = queue.Queue(maxsize=200)
 SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"}
+MAX_LOGO_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 _pending_update: Optional[dict] = None
 
 
@@ -133,6 +134,13 @@ def create_app(poller, ui_path: str) -> Flask:
         ext = os.path.splitext(f.filename)[1].lower()
         if ext not in (".png", ".jpg", ".jpeg", ".bmp"):
             return jsonify({"ok": False, "error": "Unsupported file type — use PNG or JPG"})
+
+        f.stream.seek(0, os.SEEK_END)
+        size = f.stream.tell()
+        f.stream.seek(0)
+        if size > MAX_LOGO_SIZE_BYTES:
+            return jsonify({"ok": False, "error": f"Logo must be under {MAX_LOGO_SIZE_BYTES // (1024*1024)}MB"})
+
         from config import _app_dir
         logo_path = os.path.join(_app_dir(), f"studio_logo{ext}")
         try:

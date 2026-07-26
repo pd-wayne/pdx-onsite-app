@@ -10,7 +10,10 @@ import os
 import tempfile
 import pytest
 
+import config
 import db
+import poller as poller_module
+import printer
 
 # ── Minimal order shapes ──────────────────────────────────────────────────────
 
@@ -103,3 +106,56 @@ class TestJobModeDerivation:
         db.upsert_order(dropship)
         job = db.get_job("g1")
         assert job["fulfillment_mode"] == "onsite"
+
+
+# ── Dropship image download (onsite job) ──────────────────────────────────────
+# Dropship orders on an onsite job get no receipt and must never land in a
+# routed hot folder (that would trigger DNP auto-print) — images are fetched
+# into a separate dropship/ORDER_NUM/ folder for the studio to print manually.
+
+class TestDropshipImageDownload:
+    def test_downloads_into_dropship_subfolder_not_hot_folder(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_download_images(images, folder, order_num="", api_key=""):
+            captured["folder"] = folder
+            return True, ""
+
+        monkeypatch.setattr(printer, "download_images", fake_download_images)
+        monkeypatch.setattr(config, "load", lambda: {"image_output_folder": str(tmp_path / "Hot")})
+
+        p = poller_module.Poller()
+        images = [{"filename": "a.jpg", "assetUrl": "https://example.com/a.jpg"}]
+        p._download_dropship_images("DS001", images, api_key="fake")
+
+        assert captured["folder"] == os.path.join(str(tmp_path / "Hot"), "dropship", "DS001")
+        assert not os.path.exists(str(tmp_path / "Hot" / "a.jpg"))
+
+    def test_no_images_marks_ok_without_downloading(self, monkeypatch):
+        monkeypatch.setattr(
+            printer, "download_images",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called"))
+        )
+        db.upsert_order(PICKUP)
+        p = poller_module.Poller()
+        p._download_dropship_images("T-001", [], api_key="fake")
+        assert db.get_order("T-001")["download_status"] == "ok"
+
+    def test_no_output_folder_marks_failed(self, monkeypatch):
+        monkeypatch.setattr(config, "load", lambda: {"image_output_folder": ""})
+        db.upsert_order(PICKUP)
+        p = poller_module.Poller()
+        images = [{"filename": "a.jpg", "assetUrl": "https://example.com/a.jpg"}]
+        p._download_dropship_images("T-001", images, api_key="fake")
+        assert db.get_order("T-001")["download_status"] == "failed"
+
+    def test_calls_on_download_done_callback(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(printer, "download_images", lambda *a, **k: (True, ""))
+        monkeypatch.setattr(config, "load", lambda: {"image_output_folder": str(tmp_path / "Hot")})
+
+        results = []
+        p = poller_module.Poller(on_download_done=lambda num, ok, err: results.append((num, ok, err)))
+        images = [{"filename": "a.jpg", "assetUrl": "https://example.com/a.jpg"}]
+        p._download_dropship_images("DS002", images, api_key="fake")
+
+        assert results == [("DS002", True, "")]

@@ -387,3 +387,192 @@ class TestJobs:
         order = make_order("NOGA001", "")
         db.upsert_order(order)
         assert "" not in db.get_all_galleries()
+
+
+# ── destinations ──────────────────────────────────────────────────────────────
+
+class TestDestinations:
+    def test_upsert_creates_new_destination(self, fresh_db):
+        dest_id = db.upsert_destination("4x6 Printer", "C:\\Hot\\4x6")
+        assert dest_id is not None
+        dests = db.get_destinations()
+        assert len(dests) == 1
+        assert dests[0]["name"] == "4x6 Printer"
+        assert dests[0]["hot_folder_path"] == "C:\\Hot\\4x6"
+        assert dests[0]["active"] == 1
+
+    def test_upsert_with_id_updates_existing(self, fresh_db):
+        dest_id = db.upsert_destination("4x6 Printer", "C:\\Hot\\4x6")
+        db.upsert_destination("4x6 Printer Renamed", "C:\\Hot\\4x6b", dest_id=dest_id)
+        dests = db.get_destinations()
+        assert len(dests) == 1
+        assert dests[0]["id"] == dest_id
+        assert dests[0]["name"] == "4x6 Printer Renamed"
+        assert dests[0]["hot_folder_path"] == "C:\\Hot\\4x6b"
+
+    def test_setting_new_default_clears_previous_default(self, fresh_db):
+        first = db.upsert_destination("A", "C:\\A", is_default=True)
+        second = db.upsert_destination("B", "C:\\B", is_default=True)
+        dests = {d["id"]: d for d in db.get_destinations()}
+        assert dests[first]["is_default"] == 0
+        assert dests[second]["is_default"] == 1
+
+    def test_get_default_destination_returns_marked_default(self, fresh_db):
+        db.upsert_destination("A", "C:\\A", is_default=False)
+        b = db.upsert_destination("B", "C:\\B", is_default=True)
+        default = db.get_default_destination()
+        assert default["id"] == b
+
+    def test_get_default_destination_falls_back_to_any_active(self, fresh_db):
+        dest_id = db.upsert_destination("A", "C:\\A", is_default=False)
+        default = db.get_default_destination()
+        assert default["id"] == dest_id
+
+    def test_get_default_destination_none_when_empty(self, fresh_db):
+        assert db.get_default_destination() is None
+
+    def test_delete_destination_succeeds_when_unused(self, fresh_db):
+        dest_id = db.upsert_destination("A", "C:\\A")
+        assert db.delete_destination(dest_id) is True
+        assert db.get_destinations() == []
+
+    def test_delete_destination_blocked_when_referenced_by_order_item(self, fresh_db, pickup_order):
+        dest_id = db.upsert_destination("A", "C:\\A")
+        db.upsert_order(pickup_order)
+        order = db.get_order("GS1777844776")
+        db.insert_order_item(order["id"], "a.jpg", "8x24", dest_id)
+
+        assert db.delete_destination(dest_id) is False
+        assert len(db.get_destinations()) == 1
+
+    def test_delete_destination_nulls_out_routing_references(self, fresh_db):
+        dest_id = db.upsert_destination("A", "C:\\A")
+        db.upsert_routing("8x24", dest_id)
+        db.delete_destination(dest_id)
+        routing = db.get_routing()
+        assert routing[0]["destination_id"] is None
+
+    def test_update_destination_health_sets_last_success_at(self, fresh_db):
+        dest_id = db.upsert_destination("A", "C:\\A")
+        assert db.get_destinations()[0]["last_success_at"] is None
+        db.update_destination_health(dest_id)
+        assert db.get_destinations()[0]["last_success_at"] is not None
+
+
+# ── product routing ───────────────────────────────────────────────────────────
+
+class TestProductRouting:
+    def test_upsert_routing_creates_new_entry(self, fresh_db):
+        dest_id = db.upsert_destination("A", "C:\\A")
+        db.upsert_routing("8x24", dest_id)
+        routing = db.get_routing()
+        assert len(routing) == 1
+        assert routing[0]["print_spec"] == "8x24"
+        assert routing[0]["destination_id"] == dest_id
+
+    def test_upsert_routing_updates_existing_spec(self, fresh_db):
+        a = db.upsert_destination("A", "C:\\A")
+        b = db.upsert_destination("B", "C:\\B")
+        db.upsert_routing("8x24", a)
+        db.upsert_routing("8x24", b)
+        routing = db.get_routing()
+        assert len(routing) == 1
+        assert routing[0]["destination_id"] == b
+
+    def test_upsert_routing_allows_unassigned(self, fresh_db):
+        db.upsert_routing("8x24", None)
+        assert db.get_routing()[0]["destination_id"] is None
+
+    def test_discover_specs_adds_unknown_specs(self, fresh_db):
+        added = db.discover_specs(["8x24", "5x7", ""])
+        assert added == 2
+        specs = {r["print_spec"] for r in db.get_routing()}
+        assert specs == {"8x24", "5x7"}
+
+    def test_discover_specs_skips_already_known(self, fresh_db):
+        db.upsert_routing("8x24", None)
+        added = db.discover_specs(["8x24", "5x7"])
+        assert added == 1
+
+    def test_get_destination_for_spec_returns_assigned_destination(self, fresh_db):
+        default_dest = db.upsert_destination("Default", "C:\\Default", is_default=True)
+        specific = db.upsert_destination("Poster", "C:\\Poster")
+        db.upsert_routing("8x24", specific)
+        resolved = db.get_destination_for_spec("8x24")
+        assert resolved["id"] == specific
+
+    def test_get_destination_for_spec_falls_back_to_default_when_unassigned(self, fresh_db):
+        default_dest = db.upsert_destination("Default", "C:\\Default", is_default=True)
+        db.upsert_routing("8x24", None)
+        resolved = db.get_destination_for_spec("8x24")
+        assert resolved["id"] == default_dest
+
+    def test_get_destination_for_spec_falls_back_to_default_when_unknown_spec(self, fresh_db):
+        default_dest = db.upsert_destination("Default", "C:\\Default", is_default=True)
+        resolved = db.get_destination_for_spec("never-seen")
+        assert resolved["id"] == default_dest
+
+    def test_get_destination_for_spec_falls_back_when_assigned_destination_inactive(self, fresh_db):
+        default_dest = db.upsert_destination("Default", "C:\\Default", is_default=True)
+        inactive = db.upsert_destination("Old Printer", "C:\\Old", active=False)
+        db.upsert_routing("8x24", inactive)
+        resolved = db.get_destination_for_spec("8x24")
+        assert resolved["id"] == default_dest
+
+
+# ── order items / check_order_ready ────────────────────────────────────────────
+
+class TestCheckOrderReady:
+    def _setup_order_with_items(self, fresh_db, pickup_order, n=2):
+        dest_id = db.upsert_destination("A", "C:\\A")
+        db.upsert_order(pickup_order)
+        order = db.get_order("GS1777844776")
+        item_ids = [
+            db.insert_order_item(order["id"], f"img{i}.jpg", "8x24", dest_id)
+            for i in range(n)
+        ]
+        return order, item_ids
+
+    def test_false_when_no_order_items_exist(self, fresh_db, pickup_order):
+        db.upsert_order(pickup_order)
+        assert db.check_order_ready("GS1777844776") is False
+        assert db.get_order("GS1777844776")["status"] == "received"
+
+    def test_false_when_some_items_still_queued(self, fresh_db, pickup_order):
+        order, item_ids = self._setup_order_with_items(fresh_db, pickup_order, n=2)
+        db.update_item_status(item_ids[0], "printed")
+        assert db.check_order_ready("GS1777844776") is False
+        assert db.get_order("GS1777844776")["status"] == "received"
+
+    def test_true_and_transitions_when_all_items_printed(self, fresh_db, pickup_order):
+        order, item_ids = self._setup_order_with_items(fresh_db, pickup_order, n=2)
+        for item_id in item_ids:
+            db.update_item_status(item_id, "printed")
+        assert db.check_order_ready("GS1777844776") is True
+        assert db.get_order("GS1777844776")["status"] == "ready"
+
+    def test_error_status_item_blocks_ready(self, fresh_db, pickup_order):
+        order, item_ids = self._setup_order_with_items(fresh_db, pickup_order, n=2)
+        db.update_item_status(item_ids[0], "printed")
+        db.update_item_status(item_ids[1], "error")
+        assert db.check_order_ready("GS1777844776") is False
+        assert db.get_order("GS1777844776")["status"] == "received"
+
+    def test_false_when_already_ready(self, fresh_db, pickup_order):
+        order, item_ids = self._setup_order_with_items(fresh_db, pickup_order, n=1)
+        db.update_item_status(item_ids[0], "printed")
+        assert db.check_order_ready("GS1777844776") is True
+        # Second call: order is no longer 'received', so it should not re-fire
+        assert db.check_order_ready("GS1777844776") is False
+
+    def test_false_for_nonexistent_order(self, fresh_db):
+        assert db.check_order_ready("NOPE") is False
+
+    def test_update_item_status_sets_printed_at(self, fresh_db, pickup_order):
+        order, item_ids = self._setup_order_with_items(fresh_db, pickup_order, n=1)
+        before = db.get_order_items("GS1777844776")[0]
+        assert before["printed_at"] is None
+        db.update_item_status(item_ids[0], "printed")
+        after = db.get_order_items("GS1777844776")[0]
+        assert after["printed_at"] is not None
+        assert after["status"] == "printed"
