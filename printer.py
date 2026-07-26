@@ -710,14 +710,13 @@ def _parse_packing_slip_items(order: dict) -> list:
     ]
 
 
-def _group_items_to_slip_rows(group: dict) -> list:
-    """Flatten a bulk-order group's own items[] (assumed self-contained, each with
-    its own images[]) into slip rows. NOTE: the real PDX bulk-group item shape isn't
-    confirmed against a live sample — if a group's items don't carry images
-    directly, this returns an empty list and the caller falls back to printing the
-    whole order's items on that group's slip."""
+def _raw_items_to_slip_rows(items: list) -> list:
+    """Flatten a raw PDX items[] list (each with its own images[]) into slip rows —
+    same shape _parse_packing_slip_items produces from the stored images_json, but
+    built directly from raw item dicts. Needed for bulk-group matching: groupId
+    isn't preserved in the flattened images_json column, only on the raw item."""
     rows = []
-    for it in group.get("items", []) or []:
+    for it in items or []:
         desc = it.get("description", "")
         for img in it.get("images", []) or []:
             rows.append({
@@ -726,6 +725,24 @@ def _group_items_to_slip_rows(group: dict) -> list:
                 "print_spec": img.get("externalId", ""),
             })
     return rows
+
+
+def _humanize_field_key(key: str) -> str:
+    return key.replace("_", " ").replace("-", " ").strip().title()
+
+
+def _group_label_and_display_fields(fields: list) -> tuple:
+    """Prefer a first/last name pair if the group's fields carry one (the common
+    case for roster/team orders) as the bold header line, and drop those two keys
+    from the fields shown below it so the name isn't repeated. Otherwise join
+    whatever values are present and show all fields below unfiltered."""
+    by_key = {f.get("key", ""): f.get("value", "") for f in fields}
+    name = f"{by_key.get('first_name', '')} {by_key.get('last_name', '')}".strip()
+    if name:
+        remaining = [f for f in fields if f.get("key") not in ("first_name", "last_name")]
+        return name, remaining
+    values = [str(f.get("value", "")) for f in fields if f.get("value")]
+    return (" / ".join(values) or "Group"), fields
 
 
 PACKING_SLIP_DPI = 200
@@ -801,7 +818,8 @@ def _render_packing_slip_pages(order_num: str, header_block: dict, items: list, 
         draw.text((pad, y), header_block["group_label"], font=f_bold, fill="black")
         y += lh_body
         for f in header_block.get("fields", []):
-            draw.text((pad, y), f"{f.get('label', '')}: {f.get('value', '')}", font=f_body, fill="black")
+            key_label = _humanize_field_key(f.get("key", ""))
+            draw.text((pad, y), f"{key_label}: {f.get('value', '')}", font=f_body, fill="black")
             y += lh_body
     else:
         draw.text((pad, y), header_block.get("customer", "Unknown"), font=f_bold, fill="black")
@@ -843,12 +861,14 @@ def _render_packing_slip_pages(order_num: str, header_block: dict, items: list, 
 
 def build_packing_slip_pages(order: dict, destinations: list, studio_name: str = "") -> list:
     """
-    Build the packing-slip page images for one order. Bulk orders (isBulkOrder=True
-    in the raw PDX payload) get one slip section per groups[] entry, each showing
-    that group's fields (Name/Grade/Teacher, etc.) instead of customer info.
-    Standard orders get a single slip section. Returns a flat list of RGB pages —
-    concatenate across orders and pass to build_packing_slips_pdf() for one
-    combined multi-page PDF (one print dialog for a whole batch).
+    Build the packing-slip page images for one order. Bulk/roster orders (signaled
+    by a non-empty groups[] in the raw PDX payload — isBulkOrder isn't a reliable
+    signal, confirmed absent on a live sample) get one slip section per group,
+    matched to that group's items via item.groupId == group.id, showing the
+    group's fields (first/last name, roster number, etc.) instead of customer
+    info. Standard orders get a single slip section. Returns a flat list of RGB
+    pages — concatenate across orders and pass to build_packing_slips_pdf() for
+    one combined multi-page PDF (one print dialog for a whole batch).
     """
     order_num = order.get("order_num", "")
     gallery   = order.get("gallery", "")
@@ -866,20 +886,24 @@ def build_packing_slip_pages(order: dict, destinations: list, studio_name: str =
         for it in parsed_items if it.get("filename")
     }
 
-    if raw.get("isBulkOrder") and raw.get("groups"):
+    if raw.get("groups"):
+        # Confirmed against a live PDX bulk order sample: groups[] entries carry
+        # only {id, fields} — no items of their own. The real linkage is each
+        # top-level item's groupId matching a group's id. isBulkOrder isn't a
+        # reliable signal (absent on the live sample) — non-empty groups is.
+        raw_items = raw.get("items", [])
         pages = []
         for group in raw["groups"]:
             fields = group.get("fields", [])
-            group_label = " / ".join(
-                str(f.get("value", "")) for f in fields if f.get("value")
-            ) or "Group"
-            group_rows = _group_items_to_slip_rows(group)
+            group_label, display_fields = _group_label_and_display_fields(fields)
+            matched_items = [it for it in raw_items if it.get("groupId") == group.get("id")]
+            group_rows = _raw_items_to_slip_rows(matched_items)
             if not group_rows:
-                log.warning(f"[Packing Slip] {order_num}: group had no embedded item "
-                            f"images — printing full order item list on this slip instead")
+                log.warning(f"[Packing Slip] {order_num}: group {group.get('id')} matched no "
+                            f"items via groupId — printing full order item list on this slip instead")
                 group_rows = parsed_items
             pages.extend(_render_packing_slip_pages(
-                order_num, {"group_label": group_label, "fields": fields},
+                order_num, {"group_label": group_label, "fields": display_fields},
                 group_rows, thumb_paths, studio_name,
                 gallery=gallery, placed_at=placed_at, status=status,
             ))
