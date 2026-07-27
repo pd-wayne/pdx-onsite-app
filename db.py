@@ -740,6 +740,31 @@ def get_order_items(order_num: str) -> list:
         return _get_items_by_order_id(conn, row["id"])
 
 
+def reset_order_items_to_queued(order_num: str, filenames: list = None):
+    """Reset order_items back to 'queued' (clearing printed_at) after a manual
+    reprint — makes them eligible again for Poller._check_pending_prints() to
+    detect once the re-copied file actually disappears from its hot folder.
+    Resets all of the order's items if filenames is None/empty, otherwise only
+    the given filenames."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT id FROM orders WHERE order_num = ?", (order_num,)).fetchone()
+        if not row:
+            return
+        if filenames:
+            placeholders = ",".join("?" * len(filenames))
+            conn.execute(
+                f"UPDATE order_items SET status = 'queued', printed_at = NULL "
+                f"WHERE order_id = ? AND filename IN ({placeholders})",
+                (row["id"], *filenames)
+            )
+        else:
+            conn.execute(
+                "UPDATE order_items SET status = 'queued', printed_at = NULL WHERE order_id = ?",
+                (row["id"],)
+            )
+        conn.commit()
+
+
 def get_pending_order_items() -> list:
     """Order items still sitting in their hot folder, not yet confirmed printed —
     joined with orders for order_num so the caller can promote readiness once

@@ -329,6 +329,92 @@ class TestOrderActions:
         assert resp.get_json()["ok"] is False
 
 
+class TestReprintImagesResetsStatus:
+    """Reprinting an item must reset its order_items status back to 'queued' so
+    Poller._check_pending_prints() can re-detect it printing once it disappears
+    from the hot folder again — otherwise a reprinted item stays stuck showing
+    its old status (e.g. 'error' or 'printed') forever."""
+
+    def _setup_order(self, pickup_order):
+        import printer as _printer
+        db.upsert_order(pickup_order)
+        order = db.get_order(pickup_order["num"])
+        dest_id = db.upsert_destination("A", "C:\\A")
+        filename = pickup_order["items"][0]["images"][0]["filename"]
+        item_id = db.insert_order_item(order["id"], filename, "8x24", dest_id)
+        db.update_item_status(item_id, "error")
+        return order, item_id, filename
+
+    def test_reprint_resets_item_to_queued(self, client, app, pickup_order, monkeypatch):
+        order, item_id, filename = self._setup_order(pickup_order)
+        import printer as _printer
+        monkeypatch.setattr(_printer, "reprint_images_to_hot_folder", lambda *a, **k: (True, ""))
+
+        resp = client.post("/api/reprint_images",
+                           data=json.dumps({"order_num": order["order_num"]}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+
+        items = db.get_order_items(order["order_num"])
+        assert items[0]["status"] == "queued"
+        assert items[0]["printed_at"] is None
+        # And it's eligible for the hot-folder-consumption check again
+        assert any(p["filename"] == filename for p in db.get_pending_order_items())
+
+    def test_reprint_resets_only_selected_filenames(self, client, app, pickup_order, monkeypatch):
+        order, item_id, filename = self._setup_order(pickup_order)
+        dest_id = db.upsert_destination("B", "C:\\B")
+        other_item_id = db.insert_order_item(order["id"], "other.jpg", "5x7", dest_id)
+        db.update_item_status(other_item_id, "printed")
+        # get_images_json only returns what's in images_json (one image for this fixture),
+        # so simulate a second image being present on the order too
+        with db.get_conn() as conn:
+            images = json.loads(conn.execute(
+                "SELECT images_json FROM orders WHERE id=?", (order["id"],)
+            ).fetchone()[0])
+            images.append({"filename": "other.jpg", "item_sku": "5x7", "item_idx": 1})
+            conn.execute("UPDATE orders SET images_json=? WHERE id=?", (json.dumps(images), order["id"]))
+            conn.commit()
+
+        import printer as _printer
+        monkeypatch.setattr(_printer, "reprint_images_to_hot_folder", lambda *a, **k: (True, ""))
+
+        resp = client.post("/api/reprint_images",
+                           data=json.dumps({"order_num": order["order_num"], "filenames": [filename]}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+
+        items_by_file = {it["filename"]: it for it in db.get_order_items(order["order_num"])}
+        assert items_by_file[filename]["status"] == "queued"
+        assert items_by_file["other.jpg"]["status"] == "printed"  # untouched — wasn't selected
+
+    def test_reprint_via_redownload_fallback_also_resets_status(self, client, app, pickup_order, monkeypatch):
+        order, item_id, filename = self._setup_order(pickup_order)
+        import printer as _printer
+        monkeypatch.setattr(_printer, "reprint_images_to_hot_folder", lambda *a, **k: (False, "archive missing"))
+        monkeypatch.setattr(_printer, "download_images", lambda *a, **k: (True, ""))
+
+        resp = client.post("/api/reprint_images",
+                           data=json.dumps({"order_num": order["order_num"]}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        items = db.get_order_items(order["order_num"])
+        assert items[0]["status"] == "queued"
+
+    def test_reprint_failure_does_not_reset_status(self, client, app, pickup_order, monkeypatch):
+        order, item_id, filename = self._setup_order(pickup_order)
+        import printer as _printer
+        monkeypatch.setattr(_printer, "reprint_images_to_hot_folder", lambda *a, **k: (False, "archive missing"))
+        monkeypatch.setattr(_printer, "download_images", lambda *a, **k: (False, "api down"))
+
+        resp = client.post("/api/reprint_images",
+                           data=json.dumps({"order_num": order["order_num"]}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is False
+        items = db.get_order_items(order["order_num"])
+        assert items[0]["status"] == "error"  # unchanged since reprint never actually succeeded
+
+
 # ── Packing slip (in-studio) ────────────────────────────────────────────────────
 
 class TestPackingSlip:

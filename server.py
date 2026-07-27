@@ -482,15 +482,18 @@ def create_app(poller, ui_path: str) -> Flask:
             images = [img for img in images if img.get("filename") in selected_filenames]
             if not images:
                 return jsonify({"ok": False, "error": "Selected images not found in order"})
+        reprint_filenames = [img.get("filename") for img in images if img.get("filename")]
         # Try archive restore first
         ok, err = printer.reprint_images_to_hot_folder(images, output_folder, order_num=order_num)
         if ok:
+            db.reset_order_items_to_queued(order_num, reprint_filenames)
             _log(f"🔁 Reprint queued: {order_num}")
             return jsonify({"ok": True})
         # Fall back to re-downloading from API (files may have been consumed by DNP)
         _log(f"🔁 Archive not found, re-downloading {order_num}…")
         ok2, err2 = printer.download_images(images, output_folder, order_num=order_num, api_key=api_key)
         if ok2:
+            db.reset_order_items_to_queued(order_num, reprint_filenames)
             _log(f"🔁 Reprint re-downloaded: {order_num}")
             return jsonify({"ok": True})
         return jsonify({"ok": False, "error": err2})

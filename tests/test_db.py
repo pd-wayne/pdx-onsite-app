@@ -662,3 +662,54 @@ class TestGetPendingOrderItems:
         order, item_ids, dest_id = self._setup_order_with_items(fresh_db, pickup_order, n=1)
         db.update_item_status(item_ids[0], "error")
         assert db.get_pending_order_items() == []
+
+
+class TestResetOrderItemsToQueued:
+    def _setup_order_with_items(self, fresh_db, pickup_order, n=2):
+        dest_id = db.upsert_destination("A", "C:\\A")
+        db.upsert_order(pickup_order)
+        order = db.get_order("GS1777844776")
+        item_ids = [
+            db.insert_order_item(order["id"], f"img{i}.jpg", "8x24", dest_id)
+            for i in range(n)
+        ]
+        return order, item_ids, dest_id
+
+    def test_resets_all_items_when_filenames_none(self, fresh_db, pickup_order):
+        order, item_ids, dest_id = self._setup_order_with_items(fresh_db, pickup_order, n=2)
+        for item_id in item_ids:
+            db.update_item_status(item_id, "printed")
+        db.reset_order_items_to_queued("GS1777844776")
+        items = db.get_order_items("GS1777844776")
+        assert all(it["status"] == "queued" for it in items)
+        assert all(it["printed_at"] is None for it in items)
+
+    def test_resets_only_given_filenames(self, fresh_db, pickup_order):
+        order, item_ids, dest_id = self._setup_order_with_items(fresh_db, pickup_order, n=2)
+        for item_id in item_ids:
+            db.update_item_status(item_id, "printed")
+        db.reset_order_items_to_queued("GS1777844776", ["img0.jpg"])
+        items = {it["filename"]: it for it in db.get_order_items("GS1777844776")}
+        assert items["img0.jpg"]["status"] == "queued"
+        assert items["img0.jpg"]["printed_at"] is None
+        assert items["img1.jpg"]["status"] == "printed"
+
+    def test_becomes_pending_again_after_reset(self, fresh_db, pickup_order):
+        order, item_ids, dest_id = self._setup_order_with_items(fresh_db, pickup_order, n=1)
+        db.update_item_status(item_ids[0], "printed")
+        assert db.get_pending_order_items() == []
+        db.reset_order_items_to_queued("GS1777844776", ["img0.jpg"])
+        pending = db.get_pending_order_items()
+        assert len(pending) == 1
+        assert pending[0]["filename"] == "img0.jpg"
+
+    def test_noop_for_unknown_order(self, fresh_db):
+        db.reset_order_items_to_queued("NOSUCHORDER")  # should not raise
+
+    def test_empty_filenames_list_resets_all(self, fresh_db, pickup_order):
+        order, item_ids, dest_id = self._setup_order_with_items(fresh_db, pickup_order, n=2)
+        for item_id in item_ids:
+            db.update_item_status(item_id, "printed")
+        db.reset_order_items_to_queued("GS1777844776", [])
+        items = db.get_order_items("GS1777844776")
+        assert all(it["status"] == "queued" for it in items)
