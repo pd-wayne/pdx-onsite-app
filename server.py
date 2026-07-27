@@ -195,20 +195,20 @@ def create_app(poller, ui_path: str) -> Flask:
         api_key = cfg.get("api_key", "")
 
         def _fetch():
-            orders, err = pdx_api.fetch_all_orders_for_job(lab_id, api_key, gallery)
-            if err:
-                push_event("job_history_done", {"gallery": gallery, "ok": False, "error": err})
-                return
-            from poller import _order_matches_mode
-            mode = config.load().get("fulfillment_mode", "pickup")
-            new_count = 0
-            for order_data in orders:
-                if not _order_matches_mode(order_data, mode):
-                    continue
-                if db.upsert_order(order_data):
-                    new_count += 1
-            _log(f"📂 Loaded {new_count} new orders for '{gallery}'")
-            push_event("job_history_done", {"gallery": gallery, "ok": True, "count": new_count})
+            try:
+                orders, err = pdx_api.fetch_all_orders_for_job(lab_id, api_key, gallery)
+                if err:
+                    push_event("job_history_done", {"gallery": gallery, "ok": False, "error": err})
+                    return
+                new_count = 0
+                for order_data in orders:
+                    if db.upsert_order(order_data):
+                        new_count += 1
+                _log(f"📂 Loaded {new_count} new orders for '{gallery}'")
+                push_event("job_history_done", {"gallery": gallery, "ok": True, "count": new_count})
+            except Exception as e:
+                log.warning(f"[JobHistory] Fetch failed for '{gallery}': {e}")
+                push_event("job_history_done", {"gallery": gallery, "ok": False, "error": str(e)})
 
         threading.Thread(target=_fetch, daemon=True).start()
         return jsonify({"ok": True, "message": "Fetching job history…"})
@@ -689,11 +689,7 @@ def _seed_jobs_background(lab_id: str, api_key: str):
         # Fetch historical orders from PDX API to catch jobs not yet in local DB
         orders, err = pdx_api.fetch_historical_orders(lab_id, api_key, limit_per_status=100)
         if not err:
-            from poller import _order_matches_mode
-            mode = config.load().get("fulfillment_mode", "pickup")
             for order_data in orders:
-                if not _order_matches_mode(order_data, mode):
-                    continue
                 # Upsert order into DB (handles status mapping)
                 db.upsert_order(order_data)
                 gallery = order_data.get("gallery", "")

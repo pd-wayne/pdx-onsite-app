@@ -6,6 +6,7 @@ Every test gets a fresh DB via the `client` fixture in conftest.py.
 """
 import io
 import json
+import threading
 import pytest
 import config
 import db
@@ -300,6 +301,58 @@ class TestOrderLookup:
                                       "destination": {"recipient": "C"}}})
         jobs = client.get("/api/get_jobs").get_json()
         assert any(j["gallery"] == "Job Gallery" for j in jobs)
+
+
+class TestHistoricalBackfillIngestsAllModes:
+    """Regression test: poller._order_matches_mode was deleted in Phase 3 (order
+    ingestion became mode-agnostic — see db.upsert_order), but two historical-
+    backfill call sites in server.py kept importing it, silently failing every
+    time (job dropdown clicks / every Settings save) instead of backfilling any
+    orders. Both paths must now ingest every returned order unconditionally,
+    regardless of the (now otherwise-unused) global fulfillment_mode setting."""
+
+    class _SyncThread:
+        """Runs the thread's target synchronously so the test can assert
+        immediately instead of racing a real background thread."""
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+            self._target, self._args, self._kwargs = target, args, kwargs or {}
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+    def test_fetch_job_history_ingests_regardless_of_fulfillment_mode(
+        self, client, app, monkeypatch, pickup_order, dropship_order
+    ):
+        import server as _server
+        import api as pdx_api
+
+        monkeypatch.setattr(threading, "Thread", self._SyncThread)
+        monkeypatch.setattr(
+            pdx_api, "fetch_all_orders_for_job",
+            lambda lab_id, api_key, gallery: ([pickup_order, dropship_order], None)
+        )
+        config.save({"lab_id": "L1", "api_key": "K1", "fulfillment_mode": "pickup"})
+
+        resp = client.post("/api/fetch_job_history",
+                           data=json.dumps({"gallery": pickup_order["gallery"]}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert db.get_order(pickup_order["num"]) is not None
+        assert db.get_order(dropship_order["num"]) is not None
+
+    def test_seed_jobs_background_ingests_regardless_of_fulfillment_mode(
+        self, app, monkeypatch, pickup_order, dropship_order
+    ):
+        import api as pdx_api
+        from server import _seed_jobs_background
+
+        monkeypatch.setattr(pdx_api, "fetch_historical_orders",
+                           lambda lab_id, api_key, limit_per_status=100: ([pickup_order, dropship_order], None))
+        monkeypatch.setattr(db, "migrate_fulfilled_orders", lambda *a, **k: None)
+        config.save({"lab_id": "L1", "api_key": "K1", "fulfillment_mode": "pickup"})
+
+        _seed_jobs_background("L1", "K1")  # should not raise (was throwing ImportError)
+        assert db.get_order(pickup_order["num"]) is not None
+        assert db.get_order(dropship_order["num"]) is not None
 
 
 # ── Order actions (no credentials — returns graceful failures) ────────────────
