@@ -1,5 +1,5 @@
 {
-  "version": "2.1.2",
+  "version": "2.1.3",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.1.2 — Redesigned Print Status panel with filename copy, fixed stuck action buttons, and reprinted items now correctly re-track their print status"
+  "release_notes": "v2.1.3 — Fixed historical job/order backfill silently failing when clicking a job or saving Settings"
 }
