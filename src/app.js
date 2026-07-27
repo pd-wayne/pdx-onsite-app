@@ -464,8 +464,12 @@ async function openDetail(orderNum) {
 
   const isFulfilled = order.fulfill_status === "fulfilled";
   const isConfirmed = order.status === "fulfilled";
-  document.getElementById("btn-detail-fulfill").disabled = isFulfilled || isConfirmed;
-  document.getElementById("btn-detail-confirm").disabled = isConfirmed;
+  const btnFulfill = document.getElementById("btn-detail-fulfill");
+  const btnConfirm = document.getElementById("btn-detail-confirm");
+  btnFulfill.disabled = isFulfilled || isConfirmed;
+  btnFulfill.textContent = (isFulfilled || isConfirmed) ? "🖨 Printed" : "🖨 Send to Printer";
+  btnConfirm.disabled = isConfirmed;
+  btnConfirm.textContent = isConfirmed ? "✅ Confirmed" : "✅ Confirm Pickup";
   document.getElementById("btn-detail-reprint-img").disabled = !isFulfilled && !isConfirmed;
 
   const items = parseItems(order.items_json);
@@ -480,8 +484,16 @@ async function openDetail(orderNum) {
   const routing = order.items || [];
   if (routing.length) {
     routingLabel.style.display = "block";
-    document.getElementById("detail-routing").innerHTML = routing.map(it =>
-      `<span class="spec-chip ${it.status}" title="${esc(it.destination_name || 'Unassigned')}">${esc(it.print_spec || "—")}<span class="spec-chip-dot"></span></span>`
+    const statusText = { queued: "Queued", printed: "Printed", error: "Error" };
+    document.getElementById("detail-routing").innerHTML = routing.map(it => `
+      <div class="routing-row">
+        <span class="spec-chip-dot ${it.status}"></span>
+        <span class="routing-spec">${esc(it.print_spec || "—")}</span>
+        <span class="routing-dest">→ ${esc(it.destination_name || "Unassigned")}</span>
+        <span class="routing-status ${it.status}">${statusText[it.status] || it.status}</span>
+        <button class="routing-copy-btn" title="Copy filename: ${esc(it.filename || "")}"
+                onclick="copyToClipboard('${esc(it.filename || "")}')">📋</button>
+      </div>`
     ).join("");
   } else {
     routingLabel.style.display = "none";
@@ -508,6 +520,10 @@ function renderDetailImages(order) {
   const wrap = document.getElementById("detail-images");
   if (!images.length) { wrap.innerHTML = "<div style='color:var(--text3);font-size:12px'>No images</div>"; return; }
 
+  const statusByFile = {};
+  (order.items || []).forEach(it => { statusByFile[it.filename] = it.status; });
+  const statusText = { queued: "Queued", printed: "Printed", error: "Error" };
+
   wrap.innerHTML = `
     <div style="display:flex;gap:8px;margin-bottom:8px">
       <button class="btn-xs btn-xs-ghost" onclick="selectAllImages()">Select All</button>
@@ -516,8 +532,12 @@ function renderDetailImages(order) {
     <div class="detail-images-grid">
       ${images.map(img => {
         const checked = sel.has(img.filename);
+        const status = statusByFile[img.filename];
+        const statusDot = status
+          ? `<span class="detail-img-status ${status}" title="${statusText[status] || status}"></span>`
+          : "";
         return `<div class="detail-img-item${checked ? " img-selected" : ""}" onclick="toggleImageSelect('${esc(img.filename)}')">
-          <div class="detail-img-check">${checked ? "✓" : ""}</div>
+          <div class="detail-img-check">${statusDot}${checked ? "✓" : ""}</div>
           <div class="detail-img-wrap">
             <img src="/api/image/${encodeURIComponent(order.order_num)}/${encodeURIComponent(img.filename)}"
                  alt="${esc(img.filename)}"
@@ -1092,6 +1112,15 @@ function toggleLog() {
 async function refreshAll() {
   await Promise.all([refreshQueue(), refreshHistory(), refreshStats(), refreshGalleries(), refreshJobs(), loadDestinations()]);
   renderQueue();
+}
+
+// ── Clipboard ──────────────────────────────────────────────────────────────
+function copyToClipboard(text) {
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(
+    () => toast(`📋 Copied: ${text}`, "info"),
+    () => toast("Copy failed — clipboard unavailable", "error")
+  );
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────
