@@ -93,7 +93,8 @@ def _parse_order_data(order: dict):
                 images_by_idx.setdefault(idx, []).append(fname)
     except Exception:
         pass
-    return order_num, customer, customer_phone, placed_at, items, images_by_idx, images_by_sku
+    gallery = order.get("gallery", "")
+    return order_num, customer, customer_phone, placed_at, items, images_by_idx, images_by_sku, gallery
 
 
 def _print_receipt_gdi_v1(order_num, customer, placed_at, items, images_by_idx,
@@ -209,7 +210,7 @@ def _print_receipt_gdi_v1(order_num, customer, placed_at, items, images_by_idx,
 
 
 def _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
-                       images_by_idx, images_by_sku, printer_name, studio_name) -> tuple[bool, str]:
+                       images_by_idx, images_by_sku, printer_name, studio_name, gallery="") -> tuple[bool, str]:
     """
     Print receipt using Windows GDI + PIL.
     Two-column label/value layout, dashed order-number box, Arial Bold fonts.
@@ -311,6 +312,9 @@ def _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
         if studio_name:
             centered(studio_name.upper(), y, f_large)
             y += lh_large
+        if gallery:
+            centered(gallery, y, f_bold)
+            y += lh_body
         centered("PICKUP RECEIPT", y, f_small, fill="#333333")
         y += lh_small
         if placed_at:
@@ -402,7 +406,7 @@ def _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
 
 
 def _print_receipt_escpos(order_num, customer, placed_at, items, images_by_idx,
-                          images_by_sku, printer_name, studio_name) -> tuple[bool, str]:
+                          images_by_sku, printer_name, studio_name, gallery="") -> tuple[bool, str]:
     """Plain ASCII ESC/POS fallback — no QR code, works even if GDI is unavailable."""
     SEP = "-" * LINE_WIDTH
     try:
@@ -412,6 +416,8 @@ def _print_receipt_escpos(order_num, customer, placed_at, items, images_by_idx,
 
         if studio_name:
             p.text(studio_name.upper() + "\n")
+        if gallery:
+            p.text(gallery + "\n")
         p.text("PICKUP RECEIPT\n")
         p.text(SEP + "\n")
         p.text(customer + "\n")
@@ -457,17 +463,17 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
     if not printer_name:
         return False, "No printer configured"
 
-    order_num, customer, customer_phone, placed_at, items, images_by_idx, images_by_sku = _parse_order_data(order)
+    order_num, customer, customer_phone, placed_at, items, images_by_idx, images_by_sku, gallery = _parse_order_data(order)
 
     ok, err = _print_receipt_gdi(order_num, customer, customer_phone, placed_at, items,
-                                  images_by_idx, images_by_sku, printer_name, studio_name)
+                                  images_by_idx, images_by_sku, printer_name, studio_name, gallery)
     if ok:
         log.info(f"[Printer] Receipt printed (GDI+QR): {order_num}")
         return True, ""
 
     log.warning(f"[Printer] GDI failed ({err}), falling back to ESC/POS text")
     ok, err = _print_receipt_escpos(order_num, customer, placed_at, items,
-                                     images_by_idx, images_by_sku, printer_name, studio_name)
+                                     images_by_idx, images_by_sku, printer_name, studio_name, gallery)
     if ok:
         log.info(f"[Printer] Receipt printed (ESC/POS text): {order_num}")
     return ok, err
