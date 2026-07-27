@@ -1,5 +1,5 @@
 {
-  "version": "2.1.0",
+  "version": "2.1.1",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.1.0 — In-studio packing slips (PDF + browser print dialog, bulk order support), live queue upgrades (destination health, spec chips, dropship toggle), order-ready notifications, and fixes to dropship image handling, destination setup, and logo uploads"
+  "release_notes": "v2.1.1 — Receipt now shows the job name below the studio name"
 }
