@@ -90,6 +90,36 @@ class TestSettings:
         assert data["ok"] is False
 
 
+# ── Primary destination naming ─────────────────────────────────────────────────
+
+class TestSetPrimaryDestinationName:
+    def test_seeds_and_names_when_none_exist(self, client):
+        config.save({"image_output_folder": "C:\\Hot"})
+        resp = client.post("/api/set_primary_destination_name",
+                           data=json.dumps({"name": "Front Desk DNP"}),
+                           content_type="application/json")
+        result = resp.get_json()
+        assert result["ok"] is True
+        assert result["name"] == "Front Desk DNP"
+        assert db.get_destinations()[0]["name"] == "Front Desk DNP"
+
+    def test_renames_existing_destination(self, client):
+        db.upsert_destination("Old Name", "C:\\Hot", is_default=True)
+        resp = client.post("/api/set_primary_destination_name",
+                           data=json.dumps({"name": "New Name"}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert db.get_destinations()[0]["name"] == "New Name"
+
+    def test_blank_name_defaults_to_printer_1(self, client):
+        config.save({"image_output_folder": "C:\\Hot"})
+        resp = client.post("/api/set_primary_destination_name",
+                           data=json.dumps({"name": ""}),
+                           content_type="application/json")
+        assert resp.get_json()["name"] == "Printer 1"
+        assert db.get_destinations()[0]["name"] == "Printer 1"
+
+
 # ── Logo upload ────────────────────────────────────────────────────────────────
 
 class TestUploadLogo:

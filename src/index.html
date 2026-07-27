@@ -183,6 +183,11 @@
             <div class="form-hint">Downloaded images land here. Point to your DNP hot folder for auto-printing.</div>
           </div>
           <div class="form-row">
+            <label class="form-label">Printer Name</label>
+            <input class="form-input" id="s-printer-display-name" type="text" placeholder="Printer 1">
+            <div class="form-hint">Shows up anywhere this printer is referenced in the queue. Leave blank to use "Printer 1".</div>
+          </div>
+          <div class="form-row">
             <label class="form-label">Samples Folder</label>
             <div class="form-row-inline">
               <div class="form-row" style="flex:1;margin-bottom:0"><input class="form-input mono" id="s-samples-folder" type="text" placeholder="C:\Samples"></div>
@@ -190,16 +195,12 @@
             </div>
             <div class="form-hint">Folder of sample/display images for the Samples Browser.</div>
           </div>
-        </div>
-        <div class="settings-section" id="destinations-collapsed-prompt">
-          <div class="settings-section-title">Printing Setup</div>
-          <div style="font-size:13px;color:var(--text2);line-height:1.5">
-            Using one printer? The Image Output Folder above already handles it — no further setup needed.
+          <div class="form-row" id="destinations-collapsed-prompt">
+            <div class="form-hint">
+              Need to route different print sizes to different printers (e.g. 4x6 to one DNP, 8x10 to another)?
+            </div>
+            <button class="btn-secondary" style="margin-top:8px" onclick="expandDestinations()">+ Set up multiple destinations</button>
           </div>
-          <div class="form-hint" style="margin-top:8px">
-            Need to route different print sizes to different printers (e.g. 4x6 to one DNP, 8x10 to another)?
-          </div>
-          <button class="btn-secondary" style="margin-top:10px" onclick="expandDestinations()">+ Set up multiple destinations</button>
         </div>
 
         <div id="destinations-advanced-wrap" style="display:none">

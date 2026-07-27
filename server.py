@@ -219,6 +219,18 @@ def create_app(poller, ui_path: str) -> Flask:
     def get_destinations():
         return jsonify(db.get_destinations())
 
+    @app.route("/api/set_primary_destination_name", methods=["POST"])
+    def set_primary_destination_name():
+        """Backs the simple "Printer Name" field in Settings > Folders — names
+        the sole/default destination without requiring the advanced multi-
+        destination UI. Seeds one first if none exist yet."""
+        data = request.get_json() or {}
+        name = (data.get("name") or "").strip() or "Printer 1"
+        cfg = config.load()
+        db.seed_default_destination(cfg.get("image_output_folder", ""), name=name)
+        db.set_primary_destination_name(name)
+        return jsonify({"ok": True, "name": name})
+
     @app.route("/api/save_destination", methods=["POST"])
     def save_destination():
         data = request.get_json()

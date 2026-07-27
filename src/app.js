@@ -910,6 +910,8 @@ async function loadSettings() {
     state.unclaimed_threshold = parseInt(cfg.unclaimed_threshold) || 30;
     state.destination_health_threshold = parseInt(cfg.destination_health_threshold) || 10;
     renderDestinations();
+    const primaryDest = state.destinations.find(d => d.is_default) || state.destinations[0];
+    document.getElementById("s-printer-display-name").value = primaryDest?.name || "";
     if (cfg.samples_folder) state.samplesFolder = cfg.samples_folder;
     loadPrinters(cfg.printer_name || "").catch(() => {
       document.getElementById("s-printer-name").innerHTML = '<option value="">Could not detect — enter manually</option>';
@@ -956,6 +958,9 @@ async function saveSettings() {
     state.destination_health_threshold = cfg.destination_health_threshold;
     if (cfg.samples_folder) state.samplesFolder = cfg.samples_folder;
     updateHotFolderWarning(cfg.image_output_folder);
+    const printerDisplayName = document.getElementById("s-printer-display-name").value.trim();
+    await apiPost("set_primary_destination_name", { name: printerDisplayName });
+    await loadDestinations();
     renderDestinations();
     renderDestinationHealthStrip();
     const msg = document.getElementById("settings-save-msg");
@@ -1255,11 +1260,12 @@ function renderDestinations() {
 function addDestination() {
   const list = document.getElementById("destinations-list");
   if (!list || document.getElementById("dest-row-new")) return;
+  const nextName = `Printer ${state.destinations.length + 1}`;
   const row = document.createElement("div");
   row.className = "dest-row";
   row.id = "dest-row-new";
   row.innerHTML = `
-    <input class="form-input" style="width:130px;flex-shrink:0" id="dest-name-new" placeholder="Name (e.g. 8x10)">
+    <input class="form-input" style="width:130px;flex-shrink:0" id="dest-name-new" value="${esc(nextName)}" placeholder="Name (e.g. 8x10)">
     <input class="form-input mono" style="flex:1;min-width:0" id="dest-path-new" placeholder="C:\\Hot Folder\\Path">
     <button class="btn-xs btn-xs-ghost" onclick="browseDestFolderNew()">…</button>
     <label class="dest-default-label">
@@ -1270,6 +1276,7 @@ function addDestination() {
   `;
   list.insertBefore(row, list.firstChild);
   document.getElementById("dest-name-new").focus();
+  document.getElementById("dest-name-new").select();
 }
 
 async function saveDestination(id) {

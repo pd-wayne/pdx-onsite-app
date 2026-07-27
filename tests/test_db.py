@@ -459,6 +459,53 @@ class TestDestinations:
         assert db.get_destinations()[0]["last_success_at"] is not None
 
 
+# ── printer naming (simple "Printer Name" field in Settings > Folders) ────────
+
+class TestSeedDefaultDestinationNaming:
+    def test_defaults_to_printer_1_when_no_name_given(self, fresh_db):
+        db.seed_default_destination("C:\\Hot")
+        assert db.get_destinations()[0]["name"] == "Printer 1"
+
+    def test_uses_custom_name_when_given(self, fresh_db):
+        db.seed_default_destination("C:\\Hot", name="Front Desk DNP")
+        assert db.get_destinations()[0]["name"] == "Front Desk DNP"
+
+    def test_blank_name_falls_back_to_printer_1(self, fresh_db):
+        db.seed_default_destination("C:\\Hot", name="")
+        assert db.get_destinations()[0]["name"] == "Printer 1"
+
+    def test_noop_when_destination_already_exists(self, fresh_db):
+        db.upsert_destination("Existing", "C:\\Existing")
+        db.seed_default_destination("C:\\Hot", name="Printer 1")
+        dests = db.get_destinations()
+        assert len(dests) == 1
+        assert dests[0]["name"] == "Existing"
+
+
+class TestSetPrimaryDestinationName:
+    def test_renames_the_default_destination(self, fresh_db):
+        a = db.upsert_destination("A", "C:\\A", is_default=False)
+        b = db.upsert_destination("B", "C:\\B", is_default=True)
+        db.set_primary_destination_name("Renamed")
+        dests = {d["id"]: d for d in db.get_destinations()}
+        assert dests[b]["name"] == "Renamed"
+        assert dests[a]["name"] == "A"
+
+    def test_renames_sole_destination_when_none_marked_default(self, fresh_db):
+        dest_id = db.upsert_destination("Solo", "C:\\Solo", is_default=False)
+        db.set_primary_destination_name("Renamed")
+        assert db.get_destinations()[0]["name"] == "Renamed"
+
+    def test_noop_when_no_destinations_exist(self, fresh_db):
+        db.set_primary_destination_name("Anything")
+        assert db.get_destinations() == []
+
+    def test_noop_when_name_is_blank(self, fresh_db):
+        db.upsert_destination("A", "C:\\A")
+        db.set_primary_destination_name("")
+        assert db.get_destinations()[0]["name"] == "A"
+
+
 # ── product routing ───────────────────────────────────────────────────────────
 
 class TestProductRouting:

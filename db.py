@@ -534,7 +534,7 @@ def migrate_fulfilled_orders(lab_id: str, api_key: str):
 
 # ── Destinations ──────────────────────────────────────────────────────────────
 
-def seed_default_destination(output_folder: str):
+def seed_default_destination(output_folder: str, name: str = "Printer 1"):
     """Create a default destination from the legacy output folder config if none exist."""
     if not output_folder:
         return
@@ -543,10 +543,28 @@ def seed_default_destination(output_folder: str):
         if count == 0:
             conn.execute("""
                 INSERT INTO destinations (name, hot_folder_path, is_default, active)
-                VALUES ('Default', ?, 1, 1)
-            """, (output_folder,))
+                VALUES (?, ?, 1, 1)
+            """, (name or "Printer 1", output_folder))
             conn.commit()
-            log.info(f"[DB] Seeded default destination from config: {output_folder}")
+            log.info(f"[DB] Seeded default destination '{name}' from config: {output_folder}")
+
+
+def set_primary_destination_name(name: str):
+    """Rename the default (or sole) destination — backs the simple "Printer
+    Name" field in Settings > Folders, for studios that haven't opted into
+    multiple destinations. No-op if no destinations exist yet (seeding handles
+    naming in that case)."""
+    if not name:
+        return
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM destinations WHERE is_default = 1 LIMIT 1"
+        ).fetchone()
+        if not row:
+            row = conn.execute("SELECT id FROM destinations LIMIT 1").fetchone()
+        if row:
+            conn.execute("UPDATE destinations SET name = ? WHERE id = ?", (name, row["id"]))
+            conn.commit()
 
 
 def get_destinations() -> list:
