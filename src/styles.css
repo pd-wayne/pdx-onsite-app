@@ -204,6 +204,8 @@ body{display:flex;flex-direction:column}
   border:none;border-radius:6px;cursor:pointer;
   transition:all var(--transition);white-space:nowrap;
 }
+.btn-xs:disabled{opacity:.55;cursor:default}
+.btn-xs:disabled:hover{border-color:var(--border)}
 .btn-xs-blue{background:var(--accent);color:#fff}
 .btn-xs-blue:hover{background:var(--accent2)}
 .btn-xs-ghost{background:var(--bg3);border:1px solid var(--border);color:var(--text2)}

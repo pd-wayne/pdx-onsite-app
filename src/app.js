@@ -1381,16 +1381,33 @@ function renderDestinations() {
     return `
     <div class="dest-row" id="dest-row-${d.id}">
       <span class="status-dot ${cls}" title="${esc(title)}" style="flex-shrink:0"></span>
-      <input class="form-input" style="width:130px;flex-shrink:0" id="dest-name-${d.id}" value="${esc(d.name)}" placeholder="Name">
-      <input class="form-input mono" style="flex:1;min-width:0" id="dest-path-${d.id}" value="${esc(d.hot_folder_path)}" placeholder="C:\\Hot Folder\\Path">
+      <input class="form-input" style="width:130px;flex-shrink:0" id="dest-name-${d.id}" value="${esc(d.name)}" placeholder="Name" oninput="markDestDirty(${d.id})">
+      <input class="form-input mono" style="flex:1;min-width:0" id="dest-path-${d.id}" value="${esc(d.hot_folder_path)}" placeholder="C:\\Hot Folder\\Path" oninput="markDestDirty(${d.id})">
       <button class="btn-xs btn-xs-ghost" onclick="browseDestFolder(${d.id})">…</button>
       <label class="dest-default-label" title="Use as fallback for unmapped products">
-        <input type="radio" name="dest-default" value="${d.id}" ${d.is_default ? "checked" : ""}> Default
+        <input type="radio" name="dest-default" value="${d.id}" ${d.is_default ? "checked" : ""} onchange="markAllDestsDirty()"> Default
       </label>
-      <button class="btn-xs btn-xs-blue" id="dest-save-${d.id}" onclick="saveDestination(${d.id})">Save</button>
+      <button class="btn-xs btn-xs-ghost" id="dest-save-${d.id}" disabled onclick="saveDestination(${d.id})">✓ Saved</button>
       <button class="btn-xs btn-xs-ghost dest-delete" onclick="deleteDestination(${d.id})">✕</button>
     </div>`;
   }).join("");
+}
+
+// Save starts disabled ("✓ Saved") since a freshly-loaded row is already in
+// sync with the server — it only becomes an active, clickable "Save" once the
+// user actually changes something, so the button's resting state always
+// tells you whether this row has anything pending.
+function markDestDirty(id) {
+  const btn = document.getElementById(`dest-save-${id}`);
+  if (!btn) return;
+  btn.disabled = false;
+  btn.textContent = "Save";
+  btn.classList.remove("btn-xs-ghost", "btn-xs-saved");
+  btn.classList.add("btn-xs-blue");
+}
+
+function markAllDestsDirty() {
+  state.destinations.forEach(d => markDestDirty(d.id));
 }
 
 function addDestination() {
@@ -1527,8 +1544,8 @@ function renderRouting() {
       <tbody>${rows.map(r => `
         <tr class="${!r.destination_id ? "routing-unassigned" : ""}">
           <td class="td-mono" style="font-size:11px">
-            ${!r.destination_id ? "⚠ " : ""}${esc(r.print_spec)}
-            ${r.description ? `<div style="color:var(--text3);font-size:10px;font-family:inherit;margin-top:2px">${esc(r.description)}</div>` : ""}
+            ${!r.destination_id ? "⚠ " : ""}${r.description ? esc(r.description) : esc(r.print_spec)}
+            ${r.description ? `<div style="color:var(--text3);font-size:10px;font-family:inherit;margin-top:2px">${esc(r.print_spec)}</div>` : ""}
           </td>
           <td>
             <select class="form-select" style="font-size:11px;padding:3px 8px"
