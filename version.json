@@ -1,5 +1,5 @@
 {
-  "version": "2.1.3",
+  "version": "2.2.0",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.1.3 — Fixed historical job/order backfill silently failing when clicking a job or saving Settings"
+  "release_notes": "v2.2.0 — Mark Shipped (real carrier/tracking completion), product descriptions in routing, Onsite/In-Studio settings view"
 }
