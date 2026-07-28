@@ -1,5 +1,5 @@
 {
-  "version": "2.2.1",
+  "version": "2.2.2",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.2.1 — Fixed OTA updates silently corrupting the exe on a bad download"
+  "release_notes": "v2.2.2 — Clearer Destinations save state, product descriptions shown first in routing"
 }
