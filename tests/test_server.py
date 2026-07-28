@@ -42,12 +42,11 @@ class TestSettings:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["lab_id"] == ""
-        assert data["fulfillment_mode"] == "pickup"
 
     def test_get_settings_contains_all_expected_keys(self, client):
         data = client.get("/api/get_settings").get_json()
         for key in ("lab_id", "api_key", "studio_name", "poll_interval",
-                    "fulfillment_mode", "printer_name", "image_output_folder"):
+                    "printer_name", "image_output_folder"):
             assert key in data, f"Missing key: {key}"
 
     def test_save_settings_returns_ok(self, client):
@@ -60,7 +59,6 @@ class TestSettings:
     def test_save_then_get_roundtrip(self, client):
         payload = {
             "lab_id": "lab123",
-            "fulfillment_mode": "dropship",
             "poll_interval": 30,
             "studio_name": "Wayne's Photos",
         }
@@ -68,14 +66,7 @@ class TestSettings:
                     data=json.dumps(payload), content_type="application/json")
         data = client.get("/api/get_settings").get_json()
         assert data["lab_id"] == "lab123"
-        assert data["fulfillment_mode"] == "dropship"
         assert data["poll_interval"] == 30
-
-    def test_save_fulfillment_mode_both(self, client):
-        client.post("/api/save_settings",
-                    data=json.dumps({"fulfillment_mode": "both"}),
-                    content_type="application/json")
-        assert client.get("/api/get_settings").get_json()["fulfillment_mode"] == "both"
 
     def test_get_printers_returns_list(self, client):
         resp = client.get("/api/get_printers")
@@ -303,6 +294,61 @@ class TestOrderLookup:
         assert any(j["gallery"] == "Job Gallery" for j in jobs)
 
 
+class TestGetProductsForJob:
+    def test_no_gallery_returns_empty(self, client):
+        assert client.get("/api/get_products_for_job").get_json() == []
+
+    def test_returns_products_scoped_to_gallery(self, client):
+        dest_id = db.upsert_destination("A", "C:\\A")
+        db.upsert_order({"num": "ORD001", "gallery": "Job A", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "pdx_pickup"}, "destination": {"recipient": "C"}}})
+        order = db.get_order("ORD001")
+        db.insert_order_item(order["id"], "a.jpg", "8x24", dest_id)
+        specs = client.get("/api/get_products_for_job?gallery=Job A").get_json()
+        assert specs == ["8x24"]
+        assert client.get("/api/get_products_for_job?gallery=Job B").get_json() == []
+
+
+class TestDiscoverSpecsEndpoint:
+    def test_captures_item_description_alongside_spec(self, client, monkeypatch):
+        import api as pdx_api
+        config.save({"lab_id": "L1", "api_key": "K1"})
+        monkeypatch.setattr(pdx_api, "poll_orders", lambda lab_id, api_key: ([
+            {"items": [{"description": "2 Poster COMBO",
+                        "images": [{"externalId": "combo2_8x24"}]}]}
+        ], None))
+        resp = client.post("/api/discover_specs", data="{}", content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["added"] == 1
+        routing = client.get("/api/get_routing").get_json()
+        assert routing[0]["print_spec"] == "combo2_8x24"
+        assert routing[0]["description"] == "2 Poster COMBO"
+
+    def test_real_order_sample_YH1785181240(self, client, monkeypatch):
+        """Regression test using a real PDX order export (YH1785181240,
+        Treasure Island Baseball) — confirms we key off the per-IMAGE externalId
+        (the actual print_spec/routing key, e.g. "adfadfasdf" for the 8x10 item —
+        yes, that's really what PDX sent) and pair it with the ITEM-level
+        description (e.g. "8x10"), not the item's own externalId ("8x10-1")."""
+        import api as pdx_api
+        config.save({"lab_id": "L1", "api_key": "K1"})
+        real_order = {"items": [
+            {"externalId": "2x3keychain", "description": "2x3 Keychain",
+             "images": [{"externalId": "2x3", "filename": "Treasure Island Day 2-773-97389f26.jpg"}]},
+            {"externalId": "5x7", "description": "5x7",
+             "images": [{"externalId": "5x7", "filename": "Treasure Island Day 2-525-158d5a7c.jpg"}]},
+            {"externalId": "8x10-1", "description": "8x10",
+             "images": [{"externalId": "adfadfasdf", "filename": "Treasure Island Day 2-549-cf0d886f.jpg"}]},
+        ]}
+        monkeypatch.setattr(pdx_api, "poll_orders", lambda lab_id, api_key: ([real_order], None))
+        resp = client.post("/api/discover_specs", data="{}", content_type="application/json")
+        assert resp.get_json()["added"] == 3
+        routing = {r["print_spec"]: r["description"] for r in client.get("/api/get_routing").get_json()}
+        assert routing == {"2x3": "2x3 Keychain", "5x7": "5x7", "adfadfasdf": "8x10"}
+
+
 class TestHistoricalBackfillIngestsAllModes:
     """Regression test: poller._order_matches_mode was deleted in Phase 3 (order
     ingestion became mode-agnostic — see db.upsert_order), but two historical-
@@ -330,7 +376,7 @@ class TestHistoricalBackfillIngestsAllModes:
             pdx_api, "fetch_all_orders_for_job",
             lambda lab_id, api_key, gallery: ([pickup_order, dropship_order], None)
         )
-        config.save({"lab_id": "L1", "api_key": "K1", "fulfillment_mode": "pickup"})
+        config.save({"lab_id": "L1", "api_key": "K1"})
 
         resp = client.post("/api/fetch_job_history",
                            data=json.dumps({"gallery": pickup_order["gallery"]}),
@@ -348,7 +394,7 @@ class TestHistoricalBackfillIngestsAllModes:
         monkeypatch.setattr(pdx_api, "fetch_historical_orders",
                            lambda lab_id, api_key, limit_per_status=100: ([pickup_order, dropship_order], None))
         monkeypatch.setattr(db, "migrate_fulfilled_orders", lambda *a, **k: None)
-        config.save({"lab_id": "L1", "api_key": "K1", "fulfillment_mode": "pickup"})
+        config.save({"lab_id": "L1", "api_key": "K1"})
 
         _seed_jobs_background("L1", "K1")  # should not raise (was throwing ImportError)
         assert db.get_order(pickup_order["num"]) is not None
@@ -380,6 +426,58 @@ class TestOrderActions:
                            content_type="application/json")
         assert resp.status_code == 200
         assert resp.get_json()["ok"] is False
+
+
+class TestMarkShipped:
+    def test_rejects_invalid_carrier(self, client):
+        resp = client.post("/api/mark_shipped",
+                           data=json.dumps({"order_num": "ORD001", "carrier": "CARRIER_PIGEON", "tracking_number": "123"}),
+                           content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "Invalid carrier" in data["error"]
+
+    def test_requires_tracking_number_for_non_pickup_carrier(self, client):
+        resp = client.post("/api/mark_shipped",
+                           data=json.dumps({"order_num": "ORD001", "carrier": "UPS", "tracking_number": ""}),
+                           content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "Tracking number" in data["error"]
+
+    def test_success_confirms_order_and_calls_pdx(self, client, monkeypatch):
+        import api as pdx_api
+        db.upsert_order({"num": "SHIP001", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"},
+                                      "destination": {"recipient": "C"}}})
+        calls = []
+        monkeypatch.setattr(pdx_api, "shipped_callback",
+                           lambda lab_id, api_key, order_num, carrier="Pickup", tracking_number="":
+                               (calls.append((order_num, carrier, tracking_number)), (True, ""))[1])
+
+        resp = client.post("/api/mark_shipped",
+                           data=json.dumps({"order_num": "SHIP001", "carrier": "ups", "tracking_number": "1Z999"}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert calls == [("SHIP001", "UPS", "1Z999")]
+        assert db.get_order("SHIP001")["status"] == "fulfilled"
+
+    def test_pdx_failure_does_not_confirm_order(self, client, monkeypatch):
+        import api as pdx_api
+        db.upsert_order({"num": "SHIP002", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"},
+                                      "destination": {"recipient": "C"}}})
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (False, "bad api key"))
+
+        resp = client.post("/api/mark_shipped",
+                           data=json.dumps({"order_num": "SHIP002", "carrier": "FEDEX", "tracking_number": "999"}),
+                           content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert data["error"] == "bad api key"
+        assert db.get_order("SHIP002")["status"] == "received"
 
 
 class TestReprintImagesResetsStatus:

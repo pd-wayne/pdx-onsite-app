@@ -13,17 +13,12 @@ class TestConfigLoad:
         assert cfg["lab_id"] == ""
         assert cfg["api_key"] == ""
         assert cfg["poll_interval"] == 60
-        assert cfg["fulfillment_mode"] == "pickup"
 
     def test_all_default_keys_present(self, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "CONFIG_PATH", str(tmp_path / "cfg.json"))
         cfg = config.load()
         for key in config.DEFAULTS:
             assert key in cfg
-
-    def test_fulfillment_mode_default_is_pickup(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(config, "CONFIG_PATH", str(tmp_path / "cfg.json"))
-        assert config.load()["fulfillment_mode"] == "pickup"
 
     def test_saved_values_override_defaults(self, tmp_path, monkeypatch):
         cfg_path = str(tmp_path / "cfg.json")
@@ -41,7 +36,6 @@ class TestConfigLoad:
             json.dump({"lab_id": "mylab"}, f)
         cfg = config.load()
         assert cfg["poll_interval"] == 60    # default filled in
-        assert cfg["fulfillment_mode"] == "pickup"
 
     def test_corrupt_file_returns_defaults(self, tmp_path, monkeypatch):
         cfg_path = str(tmp_path / "cfg.json")
@@ -72,7 +66,6 @@ class TestConfigSave:
             "api_key": "secret",
             "studio_name": "Test Studio",
             "poll_interval": 30,
-            "fulfillment_mode": "dropship",
         }
         config.save(payload)
         loaded = config.load()
@@ -80,12 +73,6 @@ class TestConfigSave:
         assert loaded["api_key"] == "secret"
         assert loaded["studio_name"] == "Test Studio"
         assert loaded["poll_interval"] == 30
-        assert loaded["fulfillment_mode"] == "dropship"
-
-    def test_save_fulfillment_mode_both(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(config, "CONFIG_PATH", str(tmp_path / "cfg.json"))
-        config.save({"fulfillment_mode": "both"})
-        assert config.load()["fulfillment_mode"] == "both"
 
     def test_save_includes_all_defaults(self, tmp_path, monkeypatch):
         """Saving a partial dict still writes all default keys."""

@@ -98,11 +98,15 @@ def fetch_historical_orders(lab_id: str, api_key: str, limit_per_status: int = 2
     return all_orders, ""
 
 
-def shipped_callback(lab_id: str, api_key: str, order_num: str) -> tuple[bool, str]:
+def shipped_callback(lab_id: str, api_key: str, order_num: str,
+                     carrier: str = "Pickup", tracking_number: str = "") -> tuple[bool, str]:
+    """Tell PDX an order has shipped — same endpoint whether it's an in-person
+    pickup (carrier="Pickup", no tracking number) or a real shipment (carrier +
+    tracking number from the studio's shipping process)."""
     if not lab_id or not api_key:
         return False, "Lab ID and API key are required"
     url = f"{BASE_URL}/pdx/{lab_id}/integrations/orders/{order_num}/shipped"
-    payload = {"carrier": "Pickup", "trackingNumber": ""}
+    payload = {"carrier": carrier, "trackingNumber": tracking_number}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=15)

@@ -144,6 +144,11 @@
       <!-- Settings -->
       <div id="panel-settings" class="panel">
         <div class="panel-header"><h1 class="panel-title">Settings</h1></div>
+        <div class="settings-view-toggle" id="settings-view-toggle">
+          <button class="sv-toggle-btn" data-view="onsite" onclick="setSettingsView('onsite')">Onsite</button>
+          <button class="sv-toggle-btn" data-view="in_studio" onclick="setSettingsView('in_studio')">In-Studio</button>
+          <button class="sv-toggle-btn" data-view="both" onclick="setSettingsView('both')">Both</button>
+        </div>
         <div class="settings-section">
           <div class="settings-section-title">PDX Credentials</div>
           <div class="form-row"><label class="form-label">Lab ID</label><input class="form-input mono" id="s-lab-id" type="text" autocomplete="off" spellcheck="false"></div>
@@ -156,7 +161,7 @@
         <div class="settings-section">
           <div class="settings-section-title">Studio</div>
           <div class="form-row"><label class="form-label">Studio Name</label><input class="form-input" id="s-studio-name" type="text" placeholder="e.g. Shoob Photo South"></div>
-          <div class="form-row">
+          <div class="form-row" id="settings-onsite-only-logo">
             <label class="form-label">Receipt Logo</label>
             <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
               <div id="logo-preview-wrap" style="display:none;width:80px;height:80px;border:1px solid var(--border2);border-radius:6px;overflow:hidden;background:var(--bg3);flex-shrink:0">
@@ -174,7 +179,7 @@
         </div>
         <div class="settings-section">
           <div class="settings-section-title">Folders</div>
-          <div class="form-row">
+          <div class="form-row" id="settings-image-folder-row">
             <label class="form-label">Image Output / Hot Folder</label>
             <div class="form-row-inline">
               <div class="form-row" style="flex:1;margin-bottom:0"><input class="form-input mono" id="s-image-folder" type="text" placeholder="C:\DNP\Hot Folder\Prints"></div>
@@ -187,7 +192,7 @@
             <input class="form-input" id="s-printer-display-name" type="text" placeholder="Printer 1">
             <div class="form-hint">Shows up anywhere this printer is referenced in the queue. Leave blank to use "Printer 1".</div>
           </div>
-          <div class="form-row">
+          <div class="form-row" id="settings-onsite-only-samples">
             <label class="form-label">Samples Folder</label>
             <div class="form-row-inline">
               <div class="form-row" style="flex:1;margin-bottom:0"><input class="form-input mono" id="s-samples-folder" type="text" placeholder="C:\Samples"></div>
@@ -228,8 +233,14 @@
               <button class="btn-secondary" style="font-size:11px;padding:3px 10px" onclick="discoverSpecs()">🔍 Discover Products</button>
               <span id="discover-status" style="font-size:11px;color:var(--text3);font-weight:400"></span>
             </div>
+            <div class="form-row" style="max-width:280px">
+              <label class="form-label">Show products for</label>
+              <select class="form-select" id="routing-job-filter" onchange="setRoutingJobFilter(this.value)">
+                <option value="">All Jobs</option>
+              </select>
+            </div>
             <div id="routing-table-wrap">
-              <div style="color:var(--text3);font-size:12px;padding:8px 0">No product specs found. Click Discover Products or wait for orders to arrive.</div>
+              <div style="color:var(--text3);font-size:12px;padding:8px 0">No products found. Click Discover Products or wait for orders to arrive.</div>
             </div>
           </div>
         </div>
@@ -246,18 +257,6 @@
           </div>
         </div>
         <div class="settings-section">
-          <div class="settings-section-title">Fulfillment Mode</div>
-          <div class="form-row">
-            <label class="form-label">Order Type to Process</label>
-            <select class="form-select" id="s-fulfillment-mode">
-              <option value="pickup">Pickup Only — onsite events (ignore ship-to-home)</option>
-              <option value="dropship">Drop Ship Only — mail orders (ignore pickup)</option>
-              <option value="both">Both — process all orders regardless of type</option>
-            </select>
-            <div class="form-hint">Controls which orders appear in the queue. Use <strong>Pickup Only</strong> at onsite events. Use <strong>Drop Ship Only</strong> at fulfillment stations.</div>
-          </div>
-        </div>
-        <div class="settings-section">
           <div class="settings-section-title">Polling &amp; Attention Alert</div>
           <div class="form-row"><label class="form-label">Poll Interval</label>
             <select class="form-select" id="s-poll-interval">
@@ -267,7 +266,7 @@
               <option value="300">5 minutes</option>
             </select>
           </div>
-          <div class="form-row"><label class="form-label">Needs Attention (minutes)</label>
+          <div class="form-row" id="settings-onsite-only-unclaimed"><label class="form-label">Needs Attention (minutes)</label>
             <select class="form-select" id="s-unclaimed-threshold">
               <option value="15">15 minutes</option>
               <option value="30" selected>30 minutes</option>
@@ -342,7 +341,24 @@
   <div class="detail-actions">
     <div id="detail-status-badge" class="detail-status-badge pending">⏳ Awaiting Fulfill</div>
     <button class="btn-action btn-fulfill" id="btn-detail-fulfill" onclick="detailFulfill()">🖨 Send to Printer</button>
+    <button class="btn-action btn-fulfill" id="btn-detail-print-slip" onclick="detailPrintSlip()" style="display:none">🖨 Print Slip</button>
+    <button class="btn-action btn-reprint-img" id="btn-detail-mark-slip" onclick="detailMarkSlipPrinted()" style="display:none">✓ Mark Printed</button>
     <button class="btn-action btn-confirm" id="btn-detail-confirm" onclick="detailConfirmPickup()">✅ Confirm Pickup</button>
+    <button class="btn-action btn-fulfill" id="btn-detail-mark-shipped" onclick="showShipForm()" style="display:none">📦 Mark Shipped</button>
+    <div id="detail-ship-form" style="display:none">
+      <select class="form-select" id="ship-carrier" style="width:100%;margin-bottom:6px">
+        <option value="UPS">UPS</option>
+        <option value="UPSMI">UPS Mail Innovations</option>
+        <option value="FEDEX">FedEx</option>
+        <option value="USPS">USPS</option>
+        <option value="DHL">DHL</option>
+      </select>
+      <input class="form-input" id="ship-tracking" type="text" placeholder="Tracking number" style="width:100%;margin-bottom:8px;box-sizing:border-box">
+      <div style="display:flex;gap:8px">
+        <button class="btn-action btn-confirm" style="flex:1;margin:0" onclick="detailMarkShipped()">✅ Confirm Shipped</button>
+        <button class="btn-action btn-reprint-img" style="flex:1;margin:0" onclick="hideShipForm()">Cancel</button>
+      </div>
+    </div>
     <button class="btn-action btn-reprint-img" id="btn-detail-reprint-img" onclick="detailReprintImages()">🔁 Reprint Images</button>
     <button class="btn-action btn-reprint-rcpt" onclick="detailReprintReceipt()">🧾 Reprint Receipt</button>
   </div>

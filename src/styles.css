@@ -157,6 +157,11 @@ body{display:flex;flex-direction:column}
 .panel.active{display:flex}
 .panel-header{display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-shrink:0}
 .panel-title{font-size:20px;font-weight:700;letter-spacing:-.03em;color:var(--text)}
+
+.settings-view-toggle{display:inline-flex;align-self:flex-start;width:fit-content;justify-content:flex-start;gap:2px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:2px;margin-bottom:20px}
+.sv-toggle-btn{background:none;border:none;color:var(--text3);font-size:11px;font-weight:600;padding:5px 11px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.sv-toggle-btn:hover{color:var(--text)}
+.sv-toggle-btn.active{background:var(--accent);color:#fff}
 .panel-sub{font-size:12px;color:var(--text3)}
 .avg-wait-display{font-size:12px;color:var(--text3);font-weight:500}
 
@@ -203,6 +208,7 @@ body{display:flex;flex-direction:column}
 .btn-xs-blue:hover{background:var(--accent2)}
 .btn-xs-ghost{background:var(--bg3);border:1px solid var(--border);color:var(--text2)}
 .btn-xs-ghost:hover{border-color:var(--border2);color:var(--text)}
+.btn-xs-saved{background:var(--green)!important;color:#fff!important}
 
 .status-pill{
   display:inline-flex;align-items:center;gap:4px;

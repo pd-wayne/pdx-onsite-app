@@ -138,6 +138,9 @@ def init_db():
             ("fulfillment_mode", "TEXT NOT NULL DEFAULT 'onsite'"),
             ("show_dropship",   "INTEGER NOT NULL DEFAULT 0"),
         ])
+        _migrate_columns(conn, "product_routing", [
+            ("description", "TEXT"),
+        ])
 
 
 # ── Activity log ──────────────────────────────────────────────────────────────
@@ -644,12 +647,26 @@ def update_destination_health(destination_id: int):
 def get_routing() -> list:
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT pr.id, pr.print_spec, pr.destination_id, d.name AS destination_name
+            SELECT pr.id, pr.print_spec, pr.destination_id, pr.description, d.name AS destination_name
             FROM product_routing pr
             LEFT JOIN destinations d ON pr.destination_id = d.id
             ORDER BY pr.print_spec ASC
         """).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_products_for_gallery(gallery: str) -> list:
+    """Distinct print_specs seen in order_items for orders under this gallery —
+    used to filter the Product Routing table down to just the currently
+    job-filtered job's products, instead of every spec ever discovered."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT oi.print_spec
+            FROM order_items oi
+            JOIN orders o ON oi.order_id = o.id
+            WHERE o.gallery = ?
+        """, (gallery,)).fetchall()
+        return [r["print_spec"] for r in rows]
 
 
 def upsert_routing(print_spec: str, destination_id: Optional[int]) -> int:
@@ -686,22 +703,30 @@ def get_destination_for_spec(print_spec: str) -> Optional[dict]:
     return get_default_destination()
 
 
-def discover_specs(specs: list) -> int:
-    """Insert unknown print_specs as unassigned routing rows. Returns count added."""
+def discover_specs(specs: dict) -> int:
+    """Insert unknown print_specs as unassigned routing rows. `specs` is
+    {print_spec: description} — description is the item's human-readable
+    product name (e.g. "5x7 Print"), shown alongside the raw spec code since
+    the spec itself is often a cryptic internal id. Returns count added."""
     added = 0
     with get_conn() as conn:
-        for spec in specs:
+        for spec, description in specs.items():
             if not spec:
                 continue
-            exists = conn.execute(
-                "SELECT id FROM product_routing WHERE print_spec = ?", (spec,)
+            existing = conn.execute(
+                "SELECT id, description FROM product_routing WHERE print_spec = ?", (spec,)
             ).fetchone()
-            if not exists:
+            if not existing:
                 conn.execute(
-                    "INSERT INTO product_routing (print_spec, destination_id) VALUES (?, NULL)",
-                    (spec,)
+                    "INSERT INTO product_routing (print_spec, destination_id, description) VALUES (?, NULL, ?)",
+                    (spec, description or "")
                 )
                 added += 1
+            elif description and not existing["description"]:
+                conn.execute(
+                    "UPDATE product_routing SET description = ? WHERE print_spec = ?",
+                    (description, spec)
+                )
         conn.commit()
     return added
 

@@ -441,6 +441,8 @@ async function openDetail(orderNum) {
   const order = await apiGet("get_order", { order_num: orderNum });
   if (order.error) { toast("Order not found", "error"); return; }
   state.selectedOrder = order;
+  const job = (state.jobs || []).find(j => j.gallery === order.gallery);
+  const isInStudio = job?.fulfillment_mode === "in_studio";
 
   document.getElementById("detail-order-num").innerHTML = esc(order.order_num) +
     (order.is_bulk ? `<span class="bulk-tag" title="Bulk order — ships as one batch to an organization">Bulk</span>` : "");
@@ -457,19 +459,50 @@ async function openDetail(orderNum) {
   } else if (order.status === "ready") {
     badge.className = "detail-status-badge ready"; badge.textContent = "✅ Ready for pickup";
   } else if (order.fulfill_status === "fulfilled") {
-    badge.className = "detail-status-badge fulfilled"; badge.textContent = "🖨 Printed — Awaiting Scan";
+    badge.className = "detail-status-badge fulfilled";
+    badge.textContent = isInStudio ? "🖨 Slip Printed" : "🖨 Printed — Awaiting Scan";
   } else {
     badge.className = "detail-status-badge pending"; badge.textContent = "⏳ Awaiting Fulfill";
   }
 
   const isFulfilled = order.fulfill_status === "fulfilled";
   const isConfirmed = order.status === "fulfilled";
+  const isPickupOrder = order.fulfillment_mode === "pickup";
   const btnFulfill = document.getElementById("btn-detail-fulfill");
   const btnConfirm = document.getElementById("btn-detail-confirm");
+  const btnReprintRcpt = document.querySelector(".btn-reprint-rcpt");
+  const btnPrintSlip = document.getElementById("btn-detail-print-slip");
+  const btnMarkSlip = document.getElementById("btn-detail-mark-slip");
+  const btnMarkShipped = document.getElementById("btn-detail-mark-shipped");
+
   btnFulfill.disabled = isFulfilled || isConfirmed;
   btnFulfill.textContent = (isFulfilled || isConfirmed) ? "🖨 Printed" : "🖨 Send to Printer";
+
+  // Confirm Pickup / Reprint Receipt only apply to true pickup orders — a
+  // dropship order never gets a receipt or scan-to-confirm, even on an onsite job.
+  btnConfirm.style.display = isPickupOrder ? "" : "none";
   btnConfirm.disabled = isConfirmed;
   btnConfirm.textContent = isConfirmed ? "✅ Confirmed" : "✅ Confirm Pickup";
+  if (btnReprintRcpt) btnReprintRcpt.style.display = isPickupOrder ? "" : "none";
+
+  // Mark Shipped applies to any non-pickup order (dropship or bulk-ship) —
+  // tells PDX the real carrier + tracking number, which is what should actually
+  // mark the order complete, instead of the "Pickup" placeholder Confirm Pickup sends.
+  if (btnMarkShipped) {
+    btnMarkShipped.style.display = isPickupOrder ? "none" : "";
+    btnMarkShipped.disabled = isConfirmed;
+    btnMarkShipped.textContent = isConfirmed ? "📦 Shipped" : "📦 Mark Shipped";
+  }
+  hideShipForm();
+
+  // Print Slip / Mark Printed only apply to in-studio orders, and stay clickable
+  // even after being done so staff can reprint/re-mark if something goes wrong.
+  if (btnPrintSlip) {
+    btnPrintSlip.style.display = isInStudio ? "" : "none";
+    btnPrintSlip.textContent = isFulfilled ? "🖨 Reprint Slip" : "🖨 Print Slip";
+  }
+  if (btnMarkSlip) btnMarkSlip.style.display = isInStudio ? "" : "none";
+
   document.getElementById("btn-detail-reprint-img").disabled = !isFulfilled && !isConfirmed;
 
   const items = parseItems(order.items_json);
@@ -595,6 +628,45 @@ async function detailConfirmPickup() {
   } else {
     toast(`Confirm failed: ${result.error}`, "error");
     btn.disabled = false; btn.textContent = "✅ Confirm Pickup";
+  }
+}
+
+async function detailPrintSlip() {
+  if (!state.selectedOrder) return;
+  await printPackingSlip(state.selectedOrder.order_num);
+  await openDetail(state.selectedOrder.order_num);
+}
+
+async function detailMarkSlipPrinted() {
+  if (!state.selectedOrder) return;
+  await markSlipPrinted(state.selectedOrder.order_num);
+  await openDetail(state.selectedOrder.order_num);
+}
+
+function showShipForm() {
+  document.getElementById("btn-detail-mark-shipped").style.display = "none";
+  document.getElementById("detail-ship-form").style.display = "block";
+}
+
+function hideShipForm() {
+  const form = document.getElementById("detail-ship-form");
+  if (form) form.style.display = "none";
+  document.getElementById("ship-tracking").value = "";
+}
+
+async function detailMarkShipped() {
+  if (!state.selectedOrder) return;
+  const carrier = document.getElementById("ship-carrier").value;
+  const trackingNumber = document.getElementById("ship-tracking").value.trim();
+  if (!trackingNumber) { toast("Tracking number is required", "error"); return; }
+  const result = await apiPost("mark_shipped", {
+    order_num: state.selectedOrder.order_num, carrier, tracking_number: trackingNumber
+  });
+  if (result.ok) {
+    toast(`📦 Marked shipped: ${state.selectedOrder.order_num}`, "success");
+    await openDetail(state.selectedOrder.order_num);
+  } else {
+    toast(`Mark shipped failed: ${result.error}`, "error");
   }
 }
 
@@ -911,7 +983,36 @@ async function retryDownload(orderNum, btn) {
 }
 
 // ── Settings ───────────────────────────────────────────────────────────────
+// ── Settings view toggle (Onsite / In-Studio / Both) ────────────────────────
+// Purely a local display preference — narrows which Settings fields show so a
+// studio testing both workflows (or a studio that only ever runs one) isn't
+// looking at irrelevant fields. Doesn't affect any actual job/order behavior.
+function getSettingsView() {
+  try { return localStorage.getItem("pdx_settings_view") || "both"; } catch(e) { return "both"; }
+}
+
+function setSettingsView(view) {
+  try { localStorage.setItem("pdx_settings_view", view); } catch(e) {}
+  applySettingsView(view);
+}
+
+function applySettingsView(view) {
+  document.querySelectorAll(".sv-toggle-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.view === view);
+  });
+  const hideOnsiteOnly = view === "in_studio";
+  ["settings-onsite-only-logo", "settings-onsite-only-samples", "settings-onsite-only-unclaimed"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = hideOnsiteOnly ? "none" : "";
+  });
+}
+
+function initSettingsView() {
+  applySettingsView(getSettingsView());
+}
+
 async function loadSettings() {
+  initSettingsView();
   try {
     await Promise.all([loadDestinations(), loadRouting()]);
   } catch(e) { console.warn("[Settings] routing load:", e); }
@@ -920,7 +1021,6 @@ async function loadSettings() {
     document.getElementById("s-lab-id").value = cfg.lab_id || "";
     document.getElementById("s-api-key").value = cfg.api_key || "";
     document.getElementById("s-studio-name").value = cfg.studio_name || "";
-    document.getElementById("s-fulfillment-mode").value = cfg.fulfillment_mode || "pickup";
     document.getElementById("s-print-mode").value = cfg.print_mode || "auto";
     document.getElementById("s-poll-interval").value = String(cfg.poll_interval || 60);
     document.getElementById("s-unclaimed-threshold").value = String(cfg.unclaimed_threshold || 30);
@@ -962,7 +1062,6 @@ async function saveSettings() {
     lab_id:               document.getElementById("s-lab-id").value.trim(),
     api_key:              document.getElementById("s-api-key").value.trim(),
     studio_name:          document.getElementById("s-studio-name").value.trim(),
-    fulfillment_mode:     document.getElementById("s-fulfillment-mode").value,
     poll_interval:        parseInt(document.getElementById("s-poll-interval").value),
     unclaimed_threshold:  parseInt(document.getElementById("s-unclaimed-threshold").value),
     destination_health_threshold: parseInt(document.getElementById("s-destination-health-threshold").value),
@@ -1247,6 +1346,14 @@ function updateDestinationsVisibility() {
   const show = shouldShowDestinationsAdvanced();
   collapsed.style.display = show ? "none" : "block";
   advanced.style.display = show ? "block" : "none";
+
+  // The single Image Output/Hot Folder field is only superseded once the
+  // studio has actually added a SECOND destination — not just because the
+  // advanced panel is open (opening it still shows only the one seeded
+  // destination, which isn't "additional" yet).
+  const hasMultiple = state.destinations.length > 1;
+  const imgFolderRow = document.getElementById("settings-image-folder-row");
+  if (imgFolderRow) imgFolderRow.style.display = hasMultiple ? "none" : "";
 }
 
 function expandDestinations() {
@@ -1280,7 +1387,7 @@ function renderDestinations() {
       <label class="dest-default-label" title="Use as fallback for unmapped products">
         <input type="radio" name="dest-default" value="${d.id}" ${d.is_default ? "checked" : ""}> Default
       </label>
-      <button class="btn-xs btn-xs-blue" onclick="saveDestination(${d.id})">Save</button>
+      <button class="btn-xs btn-xs-blue" id="dest-save-${d.id}" onclick="saveDestination(${d.id})">Save</button>
       <button class="btn-xs btn-xs-ghost dest-delete" onclick="deleteDestination(${d.id})">✕</button>
     </div>`;
   }).join("");
@@ -1314,8 +1421,16 @@ async function saveDestination(id) {
   const isDefault = document.querySelector(`input[name="dest-default"][value="${id}"]`)?.checked || false;
   if (!name || !path) { toast("Name and path are required", "error"); return; }
   const result = await apiPost("save_destination", { id, name, hot_folder_path: path, is_default: isDefault, active: true });
-  if (result.ok) { await loadDestinations(); renderRouting(); toast("Destination saved", "success"); }
-  else toast(`Save failed: ${result.error}`, "error");
+  if (result.ok) {
+    const btn = document.getElementById(`dest-save-${id}`);
+    if (btn) { btn.textContent = "✓ Saved"; btn.classList.add("btn-xs-saved"); btn.disabled = true; }
+    toast("Destination saved", "success");
+    await new Promise(r => setTimeout(r, 700)); // let the "Saved" state register before the row re-renders
+    await loadDestinations();
+    renderRouting();
+  } else {
+    toast(`Save failed: ${result.error}`, "error");
+  }
 }
 
 async function saveNewDestination() {
@@ -1324,8 +1439,17 @@ async function saveNewDestination() {
   const isDefault = document.querySelector('input[name="dest-default"][value="0"]')?.checked || false;
   if (!name || !path) { toast("Name and path are required", "error"); return; }
   const result = await apiPost("save_destination", { name, hot_folder_path: path, is_default: isDefault, active: true });
-  if (result.ok) { await loadDestinations(); renderRouting(); toast("Destination added", "success"); }
-  else toast(`Save failed: ${result.error}`, "error");
+  if (result.ok) {
+    const row = document.getElementById("dest-row-new");
+    const btn = row?.querySelector(".btn-xs-blue");
+    if (btn) { btn.textContent = "✓ Saved"; btn.classList.add("btn-xs-saved"); btn.disabled = true; }
+    toast("Destination added", "success");
+    await new Promise(r => setTimeout(r, 700));
+    await loadDestinations();
+    renderRouting();
+  } else {
+    toast(`Save failed: ${result.error}`, "error");
+  }
 }
 
 async function deleteDestination(id) {
@@ -1354,17 +1478,42 @@ async function browseDestFolderNew() {
 // ── Product routing ─────────────────────────────────────────────────────────
 async function loadRouting() {
   state.routing = await apiGet("get_routing");
+  renderRoutingJobFilterOptions();
+  state.routingProducts = state.routingJobFilter
+    ? await apiGet("get_products_for_job", { gallery: state.routingJobFilter })
+    : null;
   renderRouting();
+}
+
+function renderRoutingJobFilterOptions() {
+  const sel = document.getElementById("routing-job-filter");
+  if (!sel) return;
+  const current = state.routingJobFilter || "";
+  sel.innerHTML = `<option value="">All Jobs</option>` +
+    (state.jobs || []).map(j => `<option value="${esc(j.gallery)}" ${j.gallery === current ? "selected" : ""}>${esc(j.gallery)}</option>`).join("");
+}
+
+async function setRoutingJobFilter(gallery) {
+  state.routingJobFilter = gallery;
+  await loadRouting();
 }
 
 function renderRouting() {
   const wrap = document.getElementById("routing-table-wrap");
   if (!wrap) return;
-  const rows = state.routing;
   const dests = state.destinations;
 
+  let rows = state.routing;
+  if (state.routingJobFilter && state.routingProducts) {
+    const allow = new Set(state.routingProducts);
+    rows = rows.filter(r => allow.has(r.print_spec));
+  }
+
   if (!rows.length) {
-    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:8px 0">No product specs found. Click Discover Products or wait for orders to arrive.</div>`;
+    const msg = state.routingJobFilter
+      ? `No products seen yet for "${esc(state.routingJobFilter)}". Select "All Jobs" to see every discovered product.`
+      : `No products found. Click Discover Products or wait for orders to arrive.`;
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:8px 0">${msg}</div>`;
     return;
   }
 
@@ -1374,10 +1523,13 @@ function renderRouting() {
 
   wrap.innerHTML = `
     <table class="history-table" style="margin-top:6px">
-      <thead><tr><th>Print Spec</th><th>Destination</th></tr></thead>
+      <thead><tr><th>Product</th><th>Destination</th></tr></thead>
       <tbody>${rows.map(r => `
         <tr class="${!r.destination_id ? "routing-unassigned" : ""}">
-          <td class="td-mono" style="font-size:11px">${!r.destination_id ? "⚠ " : ""}${esc(r.print_spec)}</td>
+          <td class="td-mono" style="font-size:11px">
+            ${!r.destination_id ? "⚠ " : ""}${esc(r.print_spec)}
+            ${r.description ? `<div style="color:var(--text3);font-size:10px;font-family:inherit;margin-top:2px">${esc(r.description)}</div>` : ""}
+          </td>
           <td>
             <select class="form-select" style="font-size:11px;padding:3px 8px"
                     onchange="setRouting('${esc(r.print_spec).replace(/'/g,"\\'")}', this.value ? parseInt(this.value) : null)">
@@ -1402,10 +1554,10 @@ async function discoverSpecs() {
   if (result.ok) {
     await loadRouting();
     const msg = result.added > 0
-      ? `Found ${result.found} spec(s), added ${result.added} new`
-      : `Found ${result.found} spec(s) — all already mapped`;
+      ? `Found ${result.found} product(s), added ${result.added} new`
+      : `Found ${result.found} product(s) — all already mapped`;
     if (statusEl) { statusEl.textContent = msg; statusEl.style.color = "var(--text3)"; }
-    if (result.added > 0) toast(`${result.added} new product spec(s) discovered`, "info");
+    if (result.added > 0) toast(`${result.added} new product(s) discovered`, "info");
   } else {
     if (statusEl) { statusEl.textContent = result.error; statusEl.style.color = "var(--red)"; }
     toast(`Discover failed: ${result.error}`, "error");

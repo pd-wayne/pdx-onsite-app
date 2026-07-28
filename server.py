@@ -297,15 +297,23 @@ def create_app(poller, ui_path: str) -> Flask:
         orders, err = pdx_api.poll_orders(lab_id, api_key)
         if err:
             return jsonify({"ok": False, "error": err})
-        specs = set()
+        specs = {}
         for order in orders:
             for item in order.get("items", []):
+                description = item.get("description", "")
                 for img in item.get("images", []):
                     spec = img.get("externalId", "")
-                    if spec:
-                        specs.add(spec)
-        added = db.discover_specs(list(specs))
+                    if spec and spec not in specs:
+                        specs[spec] = description
+        added = db.discover_specs(specs)
         return jsonify({"ok": True, "found": len(specs), "added": added})
+
+    @app.route("/api/get_products_for_job")
+    def get_products_for_job():
+        gallery = request.args.get("gallery", "")
+        if not gallery:
+            return jsonify([])
+        return jsonify(db.get_products_for_gallery(gallery))
 
     # ── Job mode ───────────────────────────────────────────────────────────────
 
@@ -371,6 +379,33 @@ def create_app(poller, ui_path: str) -> Flask:
             return jsonify({"ok": False, "error": err})
         db.confirm_order(order_num)
         _log(f"✅ Confirmed (scanned): {order_num}")
+        push_event("order_confirmed", {"order_num": order_num})
+        return jsonify({"ok": True})
+
+    VALID_CARRIERS = {"UPS", "UPSMI", "FEDEX", "USPS", "DHL", "PICKUP"}
+
+    @app.route("/api/mark_shipped", methods=["POST"])
+    def mark_shipped():
+        """For non-pickup orders (dropship or bulk-ship): tell PDX the order has
+        actually shipped, with a real carrier + tracking number, instead of the
+        "Pickup" placeholder confirm_order() sends. This is what should drive
+        real order completion for anything that isn't picked up in person."""
+        data = request.get_json()
+        order_num = data.get("order_num", "")
+        carrier = (data.get("carrier") or "").upper()
+        tracking_number = data.get("tracking_number", "")
+        if carrier not in VALID_CARRIERS:
+            return jsonify({"ok": False, "error": f"Invalid carrier — must be one of {', '.join(sorted(VALID_CARRIERS))}"})
+        if not tracking_number and carrier != "PICKUP":
+            return jsonify({"ok": False, "error": "Tracking number is required"})
+        cfg = config.load()
+        ok, err = pdx_api.shipped_callback(cfg.get("lab_id", ""), cfg.get("api_key", ""),
+                                           order_num, carrier=carrier, tracking_number=tracking_number)
+        if not ok:
+            _log(f"Mark shipped failed for {order_num}: {err}", "error")
+            return jsonify({"ok": False, "error": err})
+        db.confirm_order(order_num)
+        _log(f"📦 Shipped ({carrier} {tracking_number}): {order_num}")
         push_event("order_confirmed", {"order_num": order_num})
         return jsonify({"ok": True})
 

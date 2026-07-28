@@ -531,15 +531,39 @@ class TestProductRouting:
         assert db.get_routing()[0]["destination_id"] is None
 
     def test_discover_specs_adds_unknown_specs(self, fresh_db):
-        added = db.discover_specs(["8x24", "5x7", ""])
+        added = db.discover_specs({"8x24": "8x24 Print", "5x7": "5x7 Print", "": "ignored"})
         assert added == 2
         specs = {r["print_spec"] for r in db.get_routing()}
         assert specs == {"8x24", "5x7"}
 
     def test_discover_specs_skips_already_known(self, fresh_db):
         db.upsert_routing("8x24", None)
-        added = db.discover_specs(["8x24", "5x7"])
+        added = db.discover_specs({"8x24": "8x24 Print", "5x7": "5x7 Print"})
         assert added == 1
+
+    def test_discover_specs_stores_description(self, fresh_db):
+        db.discover_specs({"8x24": "2 Poster COMBO"})
+        row = db.get_routing()[0]
+        assert row["description"] == "2 Poster COMBO"
+
+    def test_discover_specs_backfills_missing_description(self, fresh_db):
+        db.discover_specs({"8x24": ""})
+        db.discover_specs({"8x24": "2 Poster COMBO"})
+        assert db.get_routing()[0]["description"] == "2 Poster COMBO"
+
+    def test_discover_specs_does_not_overwrite_existing_description(self, fresh_db):
+        db.discover_specs({"8x24": "Original Name"})
+        db.discover_specs({"8x24": "Different Name"})
+        assert db.get_routing()[0]["description"] == "Original Name"
+
+    def test_get_products_for_gallery(self, fresh_db, pickup_order):
+        dest_id = db.upsert_destination("A", "C:\\A")
+        db.upsert_order(pickup_order)
+        order = db.get_order(pickup_order["num"])
+        db.insert_order_item(order["id"], "img0.jpg", "8x24", dest_id)
+        db.insert_order_item(order["id"], "img1.jpg", "5x7", dest_id)
+        assert set(db.get_products_for_gallery(pickup_order["gallery"])) == {"8x24", "5x7"}
+        assert db.get_products_for_gallery("Some Other Gallery") == []
 
     def test_get_destination_for_spec_returns_assigned_destination(self, fresh_db):
         default_dest = db.upsert_destination("Default", "C:\\Default", is_default=True)
