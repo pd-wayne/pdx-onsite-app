@@ -1,8 +1,11 @@
 """
 test_updater.py — Tests for version parsing and update logic.
 """
+import threading
+import time
 import pytest
-from updater import parse_version, APP_VERSION, PRESERVE
+import updater
+from updater import parse_version, APP_VERSION, PRESERVE, download_and_install
 
 
 class TestParseVersion:
@@ -76,6 +79,93 @@ class TestAppVersion:
         parts = APP_VERSION.split(".")
         assert len(parts) == 3
         assert all(p.isdigit() for p in parts)
+
+
+class _SyncThread:
+    """Runs the thread's target synchronously so tests can assert immediately."""
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+        self._target, self._args, self._kwargs = target, args, kwargs or {}
+    def start(self):
+        self._target(*self._args, **self._kwargs)
+
+
+class _FakeResp:
+    def __init__(self, chunks, content_length=None, ok=True):
+        self._chunks = chunks
+        self.ok = ok
+        self.status_code = 200 if ok else 500
+        self.headers = {"content-length": str(content_length)} if content_length is not None else {}
+    def iter_content(self, chunk_size=65536):
+        return iter(self._chunks)
+
+
+class TestDownloadAndInstallIntegrityChecks:
+    """A silently-truncated or corrupted OTA download must never overwrite the
+    working exe — that's exactly what produces PyInstaller's "Failed to load
+    Python DLL" bootloader error on next launch, by which point it's too late
+    to recover automatically. These checks must reject bad downloads BEFORE
+    any swap-relevant file (the .bat script) is even written."""
+
+    def _run_and_capture(self, monkeypatch, fake_resp, tmp_path):
+        import requests as _requests
+        monkeypatch.setattr(_requests, "get", lambda *a, **k: fake_resp)
+        monkeypatch.setattr(threading, "Thread", _SyncThread)
+        monkeypatch.setattr(time, "sleep", lambda *a, **k: None)
+        import tempfile as _tempfile
+        monkeypatch.setattr(_tempfile, "gettempdir", lambda: str(tmp_path))
+
+        results = {"progress": [], "complete": False, "error": None}
+        download_and_install(
+            "https://example.com/fake.exe",
+            on_progress=lambda pct, msg: results["progress"].append((pct, msg)),
+            on_complete=lambda: results.__setitem__("complete", True),
+            on_error=lambda err: results.__setitem__("error", err),
+        )
+        return results
+
+    def test_rejects_incomplete_download(self, monkeypatch, tmp_path):
+        resp = _FakeResp([b"x" * 2_000_000], content_length=5_000_000)
+        results = self._run_and_capture(monkeypatch, resp, tmp_path)
+        assert results["error"] is not None
+        assert "incomplete" in results["error"].lower()
+        assert results["complete"] is False
+        assert not (tmp_path / "_pdx_update.bat").exists()
+        assert not (tmp_path / "PDX_Onsite_update.exe").exists()
+
+    def test_rejects_too_small_download(self, monkeypatch, tmp_path):
+        resp = _FakeResp([b"MZ" + b"x" * 100], content_length=None)
+        results = self._run_and_capture(monkeypatch, resp, tmp_path)
+        assert results["error"] is not None
+        assert "small" in results["error"].lower()
+        assert results["complete"] is False
+
+    def test_rejects_invalid_executable_magic_bytes(self, monkeypatch, tmp_path):
+        resp = _FakeResp([b"<html>not an exe</html>" + b"x" * 2_000_000], content_length=None)
+        results = self._run_and_capture(monkeypatch, resp, tmp_path)
+        assert results["error"] is not None
+        assert "not a valid" in results["error"].lower()
+        assert results["complete"] is False
+
+    def test_accepts_valid_download_and_backs_up_current_exe(self, monkeypatch, tmp_path):
+        import subprocess as _subprocess
+        # DETACHED_PROCESS / CREATE_NEW_PROCESS_GROUP are Windows-only constants —
+        # stub them so this test can run on any dev machine.
+        monkeypatch.setattr(_subprocess, "DETACHED_PROCESS", 0x00000008, raising=False)
+        monkeypatch.setattr(_subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False)
+        monkeypatch.setattr(_subprocess, "Popen", lambda *a, **k: None)
+        monkeypatch.setattr(__import__("os"), "_exit", lambda *a, **k: None)
+
+        payload = b"MZ" + b"x" * 2_000_000
+        resp = _FakeResp([payload], content_length=len(payload))
+        results = self._run_and_capture(monkeypatch, resp, tmp_path)
+
+        assert results["error"] is None
+        assert results["complete"] is True
+        bat_path = tmp_path / "_pdx_update.bat"
+        assert bat_path.exists()
+        bat_content = bat_path.read_text()
+        assert ".bak" in bat_content
+        assert "move /Y" in bat_content
 
 
 class TestPreserveSet:

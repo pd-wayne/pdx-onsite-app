@@ -100,13 +100,32 @@ def download_and_install(download_url: str, on_progress=None, on_complete=None, 
                         pct = int(downloaded / total * 90)
                         on_progress(pct, f"Downloading… {pct}%")
 
+            # Verify the download is actually a complete, valid Windows executable
+            # before ever touching the working install. A silently-truncated or
+            # corrupted download here is exactly what produces PyInstaller's
+            # "Failed to load Python DLL ... LoadLibrary: The specified module
+            # could not be found" error on next launch — by then it's too late,
+            # the working exe has already been overwritten.
+            if total and downloaded != total:
+                raise Exception(f"Download incomplete: got {downloaded} of {total} bytes")
+            if downloaded < 1_000_000:
+                raise Exception(f"Downloaded file is suspiciously small ({downloaded} bytes) — aborting")
+            with open(update_exe, "rb") as f:
+                magic = f.read(2)
+            if magic != b"MZ":
+                raise Exception("Downloaded file is not a valid Windows executable (corrupted download)")
+
             if on_progress:
                 on_progress(95, "Preparing update…")
 
-            # Batch file: waits for app to exit, swaps exe, relaunches, deletes itself
+            # Batch file: waits for app to exit, backs up the current exe (so a
+            # bad swap can be recovered by hand — rename .bak back), swaps in
+            # the new one, relaunches, deletes itself.
             bat = (
                 "@echo off\n"
                 "ping -n 4 127.0.0.1 > nul\n"
+                f"if exist \"{current_exe}.bak\" del \"{current_exe}.bak\"\n"
+                f"move /Y \"{current_exe}\" \"{current_exe}.bak\"\n"
                 f"move /Y \"{update_exe}\" \"{current_exe}\"\n"
                 f"start \"\" \"{current_exe}\"\n"
                 "del \"%~f0\"\n"
