@@ -12,6 +12,7 @@ import api
 import config
 import db
 import printer
+import shipping_providers
 
 log = logging.getLogger("pdx.poller")
 
@@ -178,6 +179,16 @@ class Poller:
                 t.start()
                 log.info(f"[Poller] {order_num} dropship — fetching for manual handling (no receipt/auto-print)")
 
+                # Best-effort: create the order in a configured shipping provider now,
+                # so "Ready to Ship" only has to create the label later. Never blocks
+                # or fails ingestion — a failure here just means Ready to Ship creates
+                # the provider order itself as a fallback.
+                threading.Thread(
+                    target=self._create_shipping_order,
+                    args=(order_num, order_data),
+                    daemon=True
+                ).start()
+
         log.info(f"[Poller] Poll complete — {new_count} new order(s)")
 
         if self.on_poll_complete:
@@ -330,6 +341,32 @@ class Poller:
 
         if self.on_download_done:
             self.on_download_done(order_num, ok, err if not ok else "")
+
+    def _create_shipping_order(self, order_num: str, order_data: dict):
+        """Best-effort: create this order in whatever shipping provider is
+        configured, so "Ready to Ship" only has to create the label later.
+        Never raises into the poll loop — if this fails, Ready to Ship falls
+        back to creating the provider order itself at that point instead."""
+        provider = db.get_enabled_shipping_provider()
+        if not provider:
+            return
+        try:
+            adapter = shipping_providers.get_adapter(provider["provider_type"], provider["credentials"])
+            cfg = config.load()
+            destination = (order_data.get("shipping") or {}).get("destination", {})
+            external_order_id, err = adapter.create_order({
+                "order_num": order_num,
+                "placed_at": order_data.get("placedAt", ""),
+                "studio_name": cfg.get("studio_name", ""),
+                "destination": destination,
+            })
+            if err:
+                log.warning(f"[Shipping] Could not create provider order for {order_num}: {err}")
+                return
+            db.set_order_ship_provider(order_num, provider["id"], external_order_id)
+            log.info(f"[Shipping] Created provider order for {order_num}")
+        except Exception as e:
+            log.warning(f"[Shipping] Unexpected error creating provider order for {order_num}: {e}")
 
     def get_status(self) -> dict:
         with self._lock:

@@ -737,3 +737,134 @@ class TestResetOrderItemsToQueued:
         db.reset_order_items_to_queued("GS1777844776", [])
         items = db.get_order_items("GS1777844776")
         assert all(it["status"] == "queued" for it in items)
+
+
+class TestShippingProviders:
+    def test_empty_when_none_configured(self, fresh_db):
+        assert db.get_shipping_providers() == []
+
+    def test_create_and_get(self, fresh_db):
+        pid = db.upsert_shipping_provider(
+            provider_type="shipstation", label="ShipStation",
+            credentials={"api_key": "k1", "api_secret": "s1"}, enabled=True,
+        )
+        provider = db.get_shipping_provider(pid)
+        assert provider["provider_type"] == "shipstation"
+        assert provider["label"] == "ShipStation"
+        assert provider["credentials"] == {"api_key": "k1", "api_secret": "s1"}
+        assert provider["enabled"] == 1
+
+    def test_update_existing_by_id(self, fresh_db):
+        pid = db.upsert_shipping_provider("shipstation", "SS", {"api_key": "old"})
+        db.upsert_shipping_provider("shipstation", "SS Renamed", {"api_key": "new"}, provider_id=pid)
+        providers = db.get_shipping_providers()
+        assert len(providers) == 1
+        assert providers[0]["label"] == "SS Renamed"
+        assert providers[0]["credentials"]["api_key"] == "new"
+
+    def test_delete_removes_provider_and_its_mappings(self, fresh_db):
+        pid = db.upsert_shipping_provider("shipstation", "SS", {})
+        db.upsert_shipping_option_mapping(pid, "pdx_economy", "Economy", "ups", "ups_ground", "", "none", "UPS")
+        db.delete_shipping_provider(pid)
+        assert db.get_shipping_providers() == []
+        assert db.get_shipping_option_mappings(pid) == []
+
+    def test_get_enabled_shipping_provider(self, fresh_db):
+        db.upsert_shipping_provider("shipstation", "Disabled", {}, enabled=False)
+        pid = db.upsert_shipping_provider("shipstation", "Enabled", {}, enabled=True)
+        provider = db.get_enabled_shipping_provider()
+        assert provider["id"] == pid
+
+    def test_get_enabled_shipping_provider_none_configured(self, fresh_db):
+        assert db.get_enabled_shipping_provider() is None
+
+    def test_get_enabled_shipping_provider_all_disabled(self, fresh_db):
+        db.upsert_shipping_provider("shipstation", "SS", {}, enabled=False)
+        assert db.get_enabled_shipping_provider() is None
+
+
+class TestShippingOptionMappings:
+    def test_empty_when_none_configured(self, fresh_db):
+        pid = db.upsert_shipping_provider("shipstation", "SS", {})
+        assert db.get_shipping_option_mappings(pid) == []
+
+    def test_create_and_get(self, fresh_db):
+        pid = db.upsert_shipping_provider("shipstation", "SS", {})
+        db.upsert_shipping_option_mapping(
+            pid, "pdx_economy", "Economy", "stamps_com", "usps_priority_mail",
+            "large_flat_rate_box", "none", "USPS",
+        )
+        mapping = db.get_shipping_option_mapping(pid, "pdx_economy")
+        assert mapping["carrier_code"] == "stamps_com"
+        assert mapping["service_code"] == "usps_priority_mail"
+        assert mapping["package_code"] == "large_flat_rate_box"
+        assert mapping["pdx_carrier"] == "USPS"
+
+    def test_upsert_updates_existing_row(self, fresh_db):
+        pid = db.upsert_shipping_provider("shipstation", "SS", {})
+        db.upsert_shipping_option_mapping(pid, "pdx_economy", "Economy", "ups", "ups_ground", "", "none", "UPS")
+        db.upsert_shipping_option_mapping(pid, "pdx_economy", "Economy", "fedex", "fedex_ground", "", "none", "FEDEX")
+        mappings = db.get_shipping_option_mappings(pid)
+        assert len(mappings) == 1
+        assert mappings[0]["carrier_code"] == "fedex"
+        assert mappings[0]["pdx_carrier"] == "FEDEX"
+
+    def test_unknown_option_returns_none(self, fresh_db):
+        pid = db.upsert_shipping_provider("shipstation", "SS", {})
+        assert db.get_shipping_option_mapping(pid, "never_seen") is None
+
+    def test_get_known_pdx_shipping_options_scans_real_orders(self, fresh_db):
+        db.upsert_order({"num": "ORD001", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "pdx_economy", "name": "Economy"},
+                                      "destination": {"recipient": "C"}}})
+        db.upsert_order({"num": "ORD002", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "pdx_pickup", "name": "Pickup"},
+                                      "destination": {"recipient": "C"}}})
+        options = {o["external_id"]: o["name"] for o in db.get_known_pdx_shipping_options()}
+        assert options == {"pdx_economy": "Economy", "pdx_pickup": "Pickup"}
+
+    def test_get_known_pdx_shipping_options_empty_when_no_orders(self, fresh_db):
+        assert db.get_known_pdx_shipping_options() == []
+
+
+class TestShippedNotifications:
+    def test_not_present_by_default(self, fresh_db):
+        assert db.has_shipped_notification("ORD001") is False
+
+    def test_record_and_check(self, fresh_db):
+        db.record_shipped_notification("ORD001", "UPS", "1Z999", "shipstation")
+        assert db.has_shipped_notification("ORD001") is True
+
+    def test_record_is_idempotent(self, fresh_db):
+        db.record_shipped_notification("ORD001", "UPS", "1Z999", "shipstation")
+        db.record_shipped_notification("ORD001", "UPS", "1Z999", "shipstation")  # should not raise
+        assert db.has_shipped_notification("ORD001") is True
+
+    def test_manual_and_automated_share_the_same_dedup_log(self, fresh_db):
+        """The whole point of this table: it doesn't matter whether Mark
+        Shipped (manual) or a provider poller (automated) got there first —
+        the other path must see it as already handled."""
+        db.record_shipped_notification("ORD001", "PICKUP", "", "manual")
+        assert db.has_shipped_notification("ORD001") is True
+
+
+class TestOrderShipProviderLinkage:
+    def test_set_and_read_back_via_get_order(self, fresh_db):
+        db.upsert_order({"num": "ORD001", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"}, "destination": {"recipient": "C"}}})
+        pid = db.upsert_shipping_provider("shipstation", "SS", {})
+        db.set_order_ship_provider("ORD001", pid, "555")
+        order = db.get_order("ORD001")
+        assert order["ship_provider_id"] == pid
+        assert order["ship_external_order_id"] == "555"
+
+    def test_defaults_to_none_when_never_set(self, fresh_db):
+        db.upsert_order({"num": "ORD002", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"}, "destination": {"recipient": "C"}}})
+        order = db.get_order("ORD002")
+        assert order["ship_provider_id"] is None
+        assert order["ship_external_order_id"] is None

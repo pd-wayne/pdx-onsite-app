@@ -38,8 +38,8 @@
   <nav id="sidebar">
     <div class="nav-section-label">Workflow</div>
     <div class="nav-item active" onclick="showPanel('queue',this)"><span class="nav-icon">📋</span><span>Live Queue</span><span class="nav-badge zero" id="badge-queue">0</span></div>
-    <div class="nav-item" onclick="showPanel('scan',this)"><span class="nav-icon">📷</span><span>Scan to Confirm</span></div>
-    <div class="nav-item" onclick="showPanel('samples',this)"><span class="nav-icon">🖼</span><span>Samples</span></div>
+    <div class="nav-item" id="nav-onsite-only-scan" onclick="showPanel('scan',this)"><span class="nav-icon">📷</span><span>Scan to Confirm</span></div>
+    <div class="nav-item" id="nav-onsite-only-samples" onclick="showPanel('samples',this)"><span class="nav-icon">🖼</span><span>Samples</span></div>
     <div class="nav-section-label">Filter by Job</div>
     <div id="gallery-filter-wrap">
       <input type="text" id="job-search-input" placeholder="Search jobs…" autocomplete="off"
@@ -245,6 +245,25 @@
           </div>
         </div>
 
+        <div class="settings-section" id="settings-in-studio-only-shipping">
+          <div class="settings-section-title">Shipping Providers</div>
+
+          <div class="form-row" id="shipping-collapsed-prompt">
+            <div class="form-hint">
+              Want Onsite to automatically tell PDX when a non-pickup order ships? Connect a shipping-label provider (e.g. ShipStation) to report the real carrier and tracking number — this is optional and off until you set it up.
+            </div>
+            <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <select class="form-select" id="new-provider-type" style="width:auto;font-size:11px;padding:3px 8px"></select>
+              <button class="btn-secondary" onclick="addShippingProvider()">+ Set up shipping</button>
+            </div>
+          </div>
+
+          <div id="shipping-advanced-wrap" style="display:none">
+            <div class="form-hint" style="margin-bottom:12px">Automatically tells PDX when a non-pickup order ships, using a real carrier and tracking number. This is an addition to, not a replacement for, the Mark Shipped button on an order — it's the fallback for anything a provider doesn't report.</div>
+            <div id="shipping-providers-list"></div>
+          </div>
+        </div>
+
         <div class="settings-section">
           <div class="settings-section-title">Print Mode</div>
           <div class="form-row">
@@ -275,7 +294,7 @@
             </select>
           </div>
         </div>
-        <div class="settings-section">
+        <div class="settings-section" id="settings-onsite-only-receipt-printer">
           <div class="settings-section-title">Printer</div>
           <div class="form-row-inline">
             <div class="form-row" style="flex:1"><label class="form-label">Printer Name</label><select class="form-select" id="s-printer-name"><option value="">Loading…</option></select></div>
@@ -344,6 +363,7 @@
     <button class="btn-action btn-fulfill" id="btn-detail-print-slip" onclick="detailPrintSlip()" style="display:none">🖨 Print Slip</button>
     <button class="btn-action btn-reprint-img" id="btn-detail-mark-slip" onclick="detailMarkSlipPrinted()" style="display:none">✓ Mark Printed</button>
     <button class="btn-action btn-confirm" id="btn-detail-confirm" onclick="detailConfirmPickup()">✅ Confirm Pickup</button>
+    <button class="btn-action btn-confirm" id="btn-detail-ready-to-ship" onclick="detailReadyToShip()" style="display:none">🚀 Ready to Ship</button>
     <button class="btn-action btn-fulfill" id="btn-detail-mark-shipped" onclick="showShipForm()" style="display:none">📦 Mark Shipped</button>
     <div id="detail-ship-form" style="display:none">
       <select class="form-select" id="ship-carrier" style="width:100%;margin-bottom:6px">

@@ -233,6 +233,45 @@ class TestBuildPackingSlipPages:
         printer.build_packing_slip_pages(order, [])
         assert calls == [[{"filename": "z.jpg", "item_desc": "Fallback Item", "print_spec": "5x7"}]]
 
+    def test_address_includes_street_lines_not_just_city_state_zip(self, monkeypatch):
+        """Regression test: header_block["address"] used to only include
+        city/state/zip, silently dropping address1/address2 — the actual
+        street address never made it onto the printed packing slip."""
+        calls = []
+        monkeypatch.setattr(printer, "_render_packing_slip_pages",
+                            lambda order_num, header, *a, **k: (calls.append(header) or ["page"]))
+        order = {
+            "order_num": "ORD005", "customer_name": "Jane Doe", "gallery": "G",
+            "images_json": "[]",
+            "raw_json": json.dumps({
+                "isBulkOrder": False,
+                "shipping": {"destination": {
+                    "address1": "123 Main St", "address2": "Apt 4B",
+                    "city": "Orlando", "state": "FL", "zipCode": "32789",
+                }},
+            }),
+        }
+        printer.build_packing_slip_pages(order, [])
+        assert calls[0]["address"] == ["123 Main St", "Apt 4B", "Orlando, FL 32789"]
+
+    def test_address_omits_blank_address2(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(printer, "_render_packing_slip_pages",
+                            lambda order_num, header, *a, **k: (calls.append(header) or ["page"]))
+        order = {
+            "order_num": "ORD006", "customer_name": "Jane Doe", "gallery": "G",
+            "images_json": "[]",
+            "raw_json": json.dumps({
+                "isBulkOrder": False,
+                "shipping": {"destination": {
+                    "address1": "123 Main St", "address2": "",
+                    "city": "Orlando", "state": "FL", "zipCode": "32789",
+                }},
+            }),
+        }
+        printer.build_packing_slip_pages(order, [])
+        assert calls[0]["address"] == ["123 Main St", "Orlando, FL 32789"]
+
     def test_standard_order_handles_missing_raw_json(self, monkeypatch):
         # Order rows without raw_json (shouldn't happen in practice, but be defensive)
         calls = []

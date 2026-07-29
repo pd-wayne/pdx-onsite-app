@@ -474,6 +474,7 @@ async function openDetail(orderNum) {
   const btnPrintSlip = document.getElementById("btn-detail-print-slip");
   const btnMarkSlip = document.getElementById("btn-detail-mark-slip");
   const btnMarkShipped = document.getElementById("btn-detail-mark-shipped");
+  const btnReadyToShip = document.getElementById("btn-detail-ready-to-ship");
 
   btnFulfill.disabled = isFulfilled || isConfirmed;
   btnFulfill.textContent = (isFulfilled || isConfirmed) ? "🖨 Printed" : "🖨 Send to Printer";
@@ -485,9 +486,15 @@ async function openDetail(orderNum) {
   btnConfirm.textContent = isConfirmed ? "✅ Confirmed" : "✅ Confirm Pickup";
   if (btnReprintRcpt) btnReprintRcpt.style.display = isPickupOrder ? "" : "none";
 
-  // Mark Shipped applies to any non-pickup order (dropship or bulk-ship) —
-  // tells PDX the real carrier + tracking number, which is what should actually
-  // mark the order complete, instead of the "Pickup" placeholder Confirm Pickup sends.
+  // Ready to Ship (automated, via a configured shipping provider) and Mark
+  // Shipped (manual entry) both apply to any non-pickup order — Ready to Ship
+  // is the primary path, Mark Shipped is the fallback for anything it can't
+  // handle (no provider configured, no mapping for this shipping option, etc.)
+  if (btnReadyToShip) {
+    btnReadyToShip.style.display = isPickupOrder ? "none" : "";
+    btnReadyToShip.disabled = isConfirmed;
+    btnReadyToShip.textContent = isConfirmed ? "🚀 Shipped" : "🚀 Ready to Ship";
+  }
   if (btnMarkShipped) {
     btnMarkShipped.style.display = isPickupOrder ? "none" : "";
     btnMarkShipped.disabled = isConfirmed;
@@ -667,6 +674,21 @@ async function detailMarkShipped() {
     await openDetail(state.selectedOrder.order_num);
   } else {
     toast(`Mark shipped failed: ${result.error}`, "error");
+  }
+}
+
+async function detailReadyToShip() {
+  if (!state.selectedOrder) return;
+  const btn = document.getElementById("btn-detail-ready-to-ship");
+  const orderNum = state.selectedOrder.order_num;
+  btn.disabled = true; btn.textContent = "⏳ Creating label…";
+  const result = await apiPost("mark_ready_to_ship", { order_num: orderNum });
+  if (result.ok) {
+    toast(`🚀 Shipped: ${orderNum} (${result.carrier} ${result.tracking_number})`, "success");
+    await openDetail(orderNum);
+  } else {
+    toast(`Ready to Ship failed: ${result.error} — use Mark Shipped instead`, "error");
+    btn.disabled = false; btn.textContent = "🚀 Ready to Ship";
   }
 }
 
@@ -1001,10 +1023,34 @@ function applySettingsView(view) {
     btn.classList.toggle("active", btn.dataset.view === view);
   });
   const hideOnsiteOnly = view === "in_studio";
-  ["settings-onsite-only-logo", "settings-onsite-only-samples", "settings-onsite-only-unclaimed"].forEach(id => {
+  ["settings-onsite-only-logo", "settings-onsite-only-samples", "settings-onsite-only-unclaimed",
+   "settings-onsite-only-receipt-printer"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.style.display = hideOnsiteOnly ? "none" : "";
   });
+  ["nav-onsite-only-scan", "nav-onsite-only-samples"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = hideOnsiteOnly ? "none" : "";
+  });
+
+  // Reverse direction: shipping labels/carriers are a mail-order/in-studio
+  // concern — an onsite-only studio (pickup at the event) never needs this.
+  const hideInStudioOnly = view === "onsite";
+  ["settings-in-studio-only-shipping"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = hideInStudioOnly ? "none" : "";
+  });
+
+  // If the panel currently open just got hidden out from under the user
+  // (e.g. they were on Samples and switched to In-Studio view), fall back
+  // to Live Queue instead of leaving them on an inaccessible panel.
+  if (hideOnsiteOnly) {
+    const hiddenPanels = ["panel-scan", "panel-samples"];
+    const activePanel = document.querySelector(".panel.active");
+    if (activePanel && hiddenPanels.includes(activePanel.id)) {
+      showPanel("queue", document.querySelector('.nav-item[onclick*="queue"]'));
+    }
+  }
 }
 
 function initSettingsView() {
@@ -1014,7 +1060,7 @@ function initSettingsView() {
 async function loadSettings() {
   initSettingsView();
   try {
-    await Promise.all([loadDestinations(), loadRouting()]);
+    await Promise.all([loadDestinations(), loadRouting(), loadShippingProviders()]);
   } catch(e) { console.warn("[Settings] routing load:", e); }
   try {
     const cfg = await apiGet("get_settings");
@@ -1335,8 +1381,14 @@ async function loadDestinations() {
 }
 
 function shouldShowDestinationsAdvanced() {
-  if (state.destinations.length > 1) return true;
-  try { return localStorage.getItem("pdx_destinations_expanded") === "1"; } catch(e) { return false; }
+  // >1 (not >0): a single destination is just the auto-seeded default from
+  // the basic Image Output Folder field, not an actual multi-destination
+  // opt-in — that case must stay muted. _destinationsSetupActive is an
+  // in-memory-only exception so the section stays open while the studio is
+  // actively adding their first extra destination; unlike the old
+  // localStorage flag it never survives a reload, so an abandoned setup
+  // goes back to muted instead of getting stuck open forever.
+  return state.destinations.length > 1 || state._destinationsSetupActive === true;
 }
 
 function updateDestinationsVisibility() {
@@ -1357,7 +1409,7 @@ function updateDestinationsVisibility() {
 }
 
 function expandDestinations() {
-  try { localStorage.setItem("pdx_destinations_expanded", "1"); } catch(e) {}
+  state._destinationsSetupActive = true;
   updateDestinationsVisibility();
 }
 
@@ -1578,6 +1630,252 @@ async function discoverSpecs() {
   } else {
     if (statusEl) { statusEl.textContent = result.error; statusEl.style.color = "var(--red)"; }
     toast(`Discover failed: ${result.error}`, "error");
+  }
+}
+
+// ── Shipping providers ──────────────────────────────────────────────────────
+// Onsite creates the order in the provider at ingestion time and creates the
+// label on demand when staff click "Ready to Ship" on an order — there's no
+// polling schedule to configure here, just credentials and a mapping from
+// each PDX shipping option to the carrier/service/package to request.
+const PDX_CARRIERS = ["UPS", "UPSMI", "FEDEX", "USPS", "DHL"];
+const CONFIRMATION_TYPES = ["none", "delivery", "signature", "adult_signature", "direct_signature"];
+
+async function loadShippingProviders() {
+  state.shippingProviderCatalog = await apiGet("get_shipping_provider_catalog");
+  state.shippingProviders = await apiGet("get_shipping_providers");
+  state.knownShippingOptions = await apiGet("get_known_shipping_options");
+  renderProviderTypeOptions();
+  updateShippingVisibility();
+  await renderShippingProviders();
+}
+
+// Each studio only ever needs one shipping-label connection, so this mirrors
+// the Destinations collapsed-prompt pattern: stays tucked away and inert
+// until the studio actually opts in by adding a provider, instead of always
+// showing an "+ Add" list that implies multiple providers are expected.
+function updateShippingVisibility() {
+  const collapsed = document.getElementById("shipping-collapsed-prompt");
+  const advanced = document.getElementById("shipping-advanced-wrap");
+  if (!collapsed || !advanced) return;
+  const hasProvider = (state.shippingProviders || []).length > 0;
+  collapsed.style.display = hasProvider ? "none" : "block";
+  advanced.style.display = hasProvider ? "block" : "none";
+}
+
+function renderProviderTypeOptions() {
+  const sel = document.getElementById("new-provider-type");
+  if (!sel) return;
+  sel.innerHTML = (state.shippingProviderCatalog || [])
+    .map(p => `<option value="${esc(p.provider_type)}">${esc(p.display_name)}</option>`).join("");
+}
+
+function _catalogFor(providerType) {
+  return (state.shippingProviderCatalog || []).find(p => p.provider_type === providerType);
+}
+
+async function addShippingProvider() {
+  const providerType = document.getElementById("new-provider-type").value;
+  const catalogEntry = _catalogFor(providerType);
+  if (!catalogEntry) return;
+  const result = await apiPost("save_shipping_provider", {
+    provider_type: providerType, label: catalogEntry.display_name, credentials: {}, enabled: true,
+  });
+  if (result.ok) {
+    await loadShippingProviders();
+    toast(`${catalogEntry.display_name} added — enter credentials and Save`, "success");
+  } else {
+    toast(`Add failed: ${result.error}`, "error");
+  }
+}
+
+async function renderShippingProviders() {
+  const wrap = document.getElementById("shipping-providers-list");
+  if (!wrap) return;
+  const providers = state.shippingProviders || [];
+  if (!providers.length) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:8px 0">No shipping providers connected yet.</div>`;
+    return;
+  }
+  wrap.innerHTML = providers.map(p => renderProviderCard(p)).join("");
+  await Promise.all(providers.map(p => loadShippingOptionMappings(p.id)));
+}
+
+function renderProviderCard(p) {
+  const catalogEntry = _catalogFor(p.provider_type) || { credential_fields: [] };
+  const credsHtml = catalogEntry.credential_fields.map(f => `
+    <input class="form-input" type="${f.secret ? "password" : "text"}"
+           id="ship-cred-${p.id}-${esc(f.key)}" placeholder="${esc(f.label)}"
+           value="${esc(p.credentials?.[f.key] || "")}">
+  `).join("");
+
+  return `
+  <div class="ship-provider-card" id="ship-provider-${p.id}">
+    <div class="ship-provider-header">
+      <input class="form-input" id="ship-label-${p.id}" value="${esc(p.label)}" placeholder="Name">
+      <span class="ship-provider-status">${esc(catalogEntry.display_name || p.provider_type)}</span>
+      <label class="ship-provider-toggle">
+        <input type="checkbox" id="ship-enabled-${p.id}" ${p.enabled ? "checked" : ""}> Enabled
+      </label>
+      <button class="btn-xs btn-xs-ghost dest-delete" onclick="deleteShippingProviderRow(${p.id})">✕</button>
+    </div>
+    <div class="ship-provider-creds">${credsHtml}</div>
+    <div class="ship-provider-actions">
+      <button class="btn-xs btn-xs-blue" onclick="saveShippingProviderRow(${p.id})">Save</button>
+      <button class="btn-xs btn-xs-ghost" onclick="discoverShippingOptionsRow(${p.id})">🔍 Discover Shipping Options</button>
+      <span class="ship-provider-status" id="ship-discover-status-${p.id}"></span>
+    </div>
+    <div id="ship-option-mappings-${p.id}"></div>
+  </div>`;
+}
+
+async function saveShippingProviderRow(id) {
+  const provider = (state.shippingProviders || []).find(p => p.id === id);
+  if (!provider) return;
+  const catalogEntry = _catalogFor(provider.provider_type) || { credential_fields: [] };
+  const credentials = {};
+  catalogEntry.credential_fields.forEach(f => {
+    credentials[f.key] = document.getElementById(`ship-cred-${id}-${f.key}`)?.value.trim() || "";
+  });
+  const result = await apiPost("save_shipping_provider", {
+    id,
+    provider_type: provider.provider_type,
+    label: document.getElementById(`ship-label-${id}`).value.trim() || catalogEntry.display_name,
+    credentials,
+    enabled: document.getElementById(`ship-enabled-${id}`).checked,
+  });
+  if (result.ok) {
+    toast("Provider saved", "success");
+    await loadShippingProviders();
+  } else {
+    toast(`Save failed: ${result.error}`, "error");
+  }
+}
+
+async function deleteShippingProviderRow(id) {
+  if (!confirm("Remove this shipping provider and its shipping-option mappings?")) return;
+  const result = await apiPost("delete_shipping_provider", { id });
+  if (result.ok) await loadShippingProviders();
+  else toast(`Delete failed: ${result.error}`, "error");
+}
+
+// Discovery just re-renders against state.knownShippingOptions (already loaded
+// from real order history) — nothing to fetch from the provider for this step,
+// discovery against the provider itself happens per-row when a carrier is picked.
+async function discoverShippingOptionsRow(id) {
+  state.knownShippingOptions = await apiGet("get_known_shipping_options");
+  await loadShippingOptionMappings(id);
+  const statusEl = document.getElementById(`ship-discover-status-${id}`);
+  if (statusEl) statusEl.textContent = `Found ${state.knownShippingOptions.length} shipping option(s) from order history`;
+}
+
+function _providerHasCredentials(provider) {
+  const catalogEntry = _catalogFor(provider.provider_type);
+  if (!catalogEntry) return false;
+  return catalogEntry.credential_fields.every(f => (provider.credentials?.[f.key] || "").trim());
+}
+
+async function loadShippingOptionMappings(providerId) {
+  const wrap = document.getElementById(`ship-option-mappings-${providerId}`);
+  if (!wrap) return;
+
+  const provider = (state.shippingProviders || []).find(p => p.id === providerId);
+  if (!provider || !_providerHasCredentials(provider)) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:6px 0">Enter your API credentials above and click Save to set up shipping options.</div>`;
+    return;
+  }
+
+  const options = state.knownShippingOptions || [];
+  if (!options.length) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:6px 0">No shipping options seen yet — they'll appear here once orders arrive, or click Discover Shipping Options to check now.</div>`;
+    return;
+  }
+  const existing = await apiGet("get_shipping_option_mappings", { provider_id: providerId });
+  const byOption = {};
+  existing.forEach(m => { byOption[m.pdx_option_external_id] = m; });
+
+  const carriersResult = await apiGet("list_provider_carriers", { provider_id: providerId });
+  const carriers = carriersResult.ok ? carriersResult.carriers : [];
+  if (!carriersResult.ok) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:6px 0">Could not load carriers: ${esc(carriersResult.error || "")}</div>`;
+    return;
+  }
+
+  wrap.innerHTML = options.map((opt, i) => {
+    const m = byOption[opt.external_id] || {};
+    const rowId = `${providerId}-${i}`;
+    return `
+    <div class="ship-option-row" id="ship-option-row-${rowId}" data-option-id="${esc(opt.external_id)}" data-provider-id="${providerId}">
+      <div class="ship-option-label">${!m.pdx_carrier ? "⚠ " : ""}${esc(opt.name || opt.external_id)}<div class="ship-option-code">${esc(opt.external_id)}</div></div>
+      <select class="form-select" id="ship-opt-carrier-${rowId}" onchange="onShippingOptionCarrierChange('${rowId}')">
+        <option value="">— Select carrier —</option>
+        ${carriers.map(c => `<option value="${esc(c.code)}" ${c.code === m.carrier_code ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
+      </select>
+      <select class="form-select" id="ship-opt-service-${rowId}"><option value="">— Select carrier first —</option></select>
+      <select class="form-select" id="ship-opt-package-${rowId}"><option value="">(none)</option></select>
+      <select class="form-select" id="ship-opt-confirmation-${rowId}">
+        ${CONFIRMATION_TYPES.map(c => `<option value="${c}" ${c === (m.confirmation || "none") ? "selected" : ""}>${c}</option>`).join("")}
+      </select>
+      <select class="form-select" id="ship-opt-pdxcarrier-${rowId}">
+        <option value="">— Do not map —</option>
+        ${PDX_CARRIERS.map(c => `<option value="${c}" ${c === m.pdx_carrier ? "selected" : ""}>${c}</option>`).join("")}
+      </select>
+      <button class="btn-xs btn-xs-blue" onclick="saveShippingOptionMappingRow('${rowId}')">Save</button>
+    </div>`;
+  }).join("");
+
+  // Pre-populate service/package dropdowns for rows that already have a carrier chosen.
+  options.forEach((opt, i) => {
+    const m = byOption[opt.external_id];
+    if (m && m.carrier_code) onShippingOptionCarrierChange(`${providerId}-${i}`, m.service_code, m.package_code);
+  });
+}
+
+async function onShippingOptionCarrierChange(rowId, preselectService = "", preselectPackage = "") {
+  const row = document.getElementById(`ship-option-row-${rowId}`);
+  const providerId = row?.dataset.providerId;
+  const carrierCode = document.getElementById(`ship-opt-carrier-${rowId}`)?.value;
+  const serviceSel = document.getElementById(`ship-opt-service-${rowId}`);
+  const packageSel = document.getElementById(`ship-opt-package-${rowId}`);
+  if (!carrierCode) {
+    serviceSel.innerHTML = `<option value="">— Select carrier first —</option>`;
+    packageSel.innerHTML = `<option value="">(none)</option>`;
+    return;
+  }
+  serviceSel.innerHTML = `<option value="">Loading…</option>`;
+  packageSel.innerHTML = `<option value="">Loading…</option>`;
+  const [servicesResult, packagesResult] = await Promise.all([
+    apiGet("list_provider_services", { provider_id: providerId, carrier_code: carrierCode }),
+    apiGet("list_provider_packages", { provider_id: providerId, carrier_code: carrierCode }),
+  ]);
+  serviceSel.innerHTML = servicesResult.ok
+    ? servicesResult.services.map(s => `<option value="${esc(s.code)}" ${s.code === preselectService ? "selected" : ""}>${esc(s.name)}</option>`).join("")
+    : `<option value="">Failed to load</option>`;
+  packageSel.innerHTML = `<option value="">(none — carrier default)</option>` + (packagesResult.ok
+    ? packagesResult.packages.map(p => `<option value="${esc(p.code)}" ${p.code === preselectPackage ? "selected" : ""}>${esc(p.name)}</option>`).join("")
+    : "");
+}
+
+async function saveShippingOptionMappingRow(rowId) {
+  const row = document.getElementById(`ship-option-row-${rowId}`);
+  if (!row) return;
+  const providerId = parseInt(row.dataset.providerId);
+  const optionId = row.dataset.optionId;
+  const result = await apiPost("save_shipping_option_mapping", {
+    provider_id: providerId,
+    pdx_option_external_id: optionId,
+    pdx_option_name: (state.knownShippingOptions || []).find(o => o.external_id === optionId)?.name || "",
+    carrier_code: document.getElementById(`ship-opt-carrier-${rowId}`).value,
+    service_code: document.getElementById(`ship-opt-service-${rowId}`).value,
+    package_code: document.getElementById(`ship-opt-package-${rowId}`).value,
+    confirmation: document.getElementById(`ship-opt-confirmation-${rowId}`).value,
+    pdx_carrier: document.getElementById(`ship-opt-pdxcarrier-${rowId}`).value || null,
+  });
+  if (result.ok) {
+    toast(`Mapping saved for "${optionId}"`, "success");
+    await loadShippingOptionMappings(providerId);
+  } else {
+    toast(`Save failed: ${result.error}`, "error");
   }
 }
 

@@ -8,6 +8,7 @@ import os
 import queue
 import threading
 import tkinter as tk
+from datetime import datetime
 from tkinter import filedialog
 from typing import Optional
 
@@ -17,6 +18,7 @@ import api as pdx_api
 import config
 import db
 import printer
+import shipping_providers
 
 log = logging.getLogger("pdx.server")
 _event_queue: queue.Queue = queue.Queue(maxsize=200)
@@ -44,7 +46,7 @@ def _log(msg: str, level: str = "info"):
     getattr(log, level, log.info)(msg)
 
 
-def create_app(poller, ui_path: str) -> Flask:
+def create_app(poller, ui_path: str = "") -> Flask:
     app = Flask(__name__, static_folder=None)
 
     # Seed default destination from config on startup (no-op if destinations exist)
@@ -314,6 +316,197 @@ def create_app(poller, ui_path: str) -> Flask:
         if not gallery:
             return jsonify([])
         return jsonify(db.get_products_for_gallery(gallery))
+
+    # ── Shipping providers ───────────────────────────────────────────────────────
+    # Onsite creates the provider order at ingestion (poller.py) and creates the
+    # label on demand when staff click "Ready to Ship" (below) — no discovery
+    # polling, this app pushes data in rather than discovering it after the fact.
+
+    @app.route("/api/get_shipping_provider_catalog")
+    def get_shipping_provider_catalog():
+        """Every provider type this app knows how to talk to, and the
+        credential fields each one needs — lets the Settings UI render an
+        "add provider" form generically instead of hardcoding one shape."""
+        return jsonify(shipping_providers.provider_catalog())
+
+    @app.route("/api/get_shipping_providers")
+    def get_shipping_providers():
+        return jsonify(db.get_shipping_providers())
+
+    @app.route("/api/save_shipping_provider", methods=["POST"])
+    def save_shipping_provider():
+        data = request.get_json() or {}
+        provider_type = data.get("provider_type", "")
+        if provider_type not in shipping_providers.PROVIDER_ADAPTERS:
+            return jsonify({"ok": False, "error": f"Unknown provider type: {provider_type}"})
+        try:
+            provider_id = db.upsert_shipping_provider(
+                provider_type=provider_type,
+                label=data.get("label", "").strip() or shipping_providers.PROVIDER_ADAPTERS[provider_type].display_name,
+                credentials=data.get("credentials", {}),
+                enabled=bool(data.get("enabled", True)),
+                provider_id=data.get("id"),
+            )
+            return jsonify({"ok": True, "id": provider_id})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)})
+
+    @app.route("/api/delete_shipping_provider", methods=["POST"])
+    def delete_shipping_provider():
+        data = request.get_json() or {}
+        provider_id = data.get("id")
+        if not provider_id:
+            return jsonify({"ok": False, "error": "id is required"})
+        db.delete_shipping_provider(provider_id)
+        return jsonify({"ok": True})
+
+    @app.route("/api/list_provider_carriers")
+    def list_provider_carriers():
+        provider = db.get_shipping_provider(request.args.get("provider_id", type=int))
+        if not provider:
+            return jsonify({"ok": False, "error": "Provider not found"})
+        try:
+            adapter = shipping_providers.get_adapter(provider["provider_type"], provider["credentials"])
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)})
+        carriers, err = adapter.list_carriers()
+        if err:
+            return jsonify({"ok": False, "error": err})
+        return jsonify({"ok": True, "carriers": carriers})
+
+    @app.route("/api/list_provider_services")
+    def list_provider_services():
+        provider = db.get_shipping_provider(request.args.get("provider_id", type=int))
+        carrier_code = request.args.get("carrier_code", "")
+        if not provider or not carrier_code:
+            return jsonify({"ok": False, "error": "provider_id and carrier_code are required"})
+        try:
+            adapter = shipping_providers.get_adapter(provider["provider_type"], provider["credentials"])
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)})
+        services, err = adapter.list_services(carrier_code)
+        if err:
+            return jsonify({"ok": False, "error": err})
+        return jsonify({"ok": True, "services": services})
+
+    @app.route("/api/list_provider_packages")
+    def list_provider_packages():
+        provider = db.get_shipping_provider(request.args.get("provider_id", type=int))
+        carrier_code = request.args.get("carrier_code", "")
+        if not provider or not carrier_code:
+            return jsonify({"ok": False, "error": "provider_id and carrier_code are required"})
+        try:
+            adapter = shipping_providers.get_adapter(provider["provider_type"], provider["credentials"])
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)})
+        packages, err = adapter.list_packages(carrier_code)
+        if err:
+            return jsonify({"ok": False, "error": err})
+        return jsonify({"ok": True, "packages": packages})
+
+    @app.route("/api/get_known_shipping_options")
+    def get_known_shipping_options():
+        return jsonify(db.get_known_pdx_shipping_options())
+
+    @app.route("/api/get_shipping_option_mappings")
+    def get_shipping_option_mappings():
+        provider_id = request.args.get("provider_id", type=int)
+        if not provider_id:
+            return jsonify([])
+        return jsonify(db.get_shipping_option_mappings(provider_id))
+
+    @app.route("/api/save_shipping_option_mapping", methods=["POST"])
+    def save_shipping_option_mapping():
+        data = request.get_json() or {}
+        provider_id = data.get("provider_id")
+        option_id = data.get("pdx_option_external_id", "")
+        if not provider_id or not option_id:
+            return jsonify({"ok": False, "error": "provider_id and pdx_option_external_id are required"})
+        db.upsert_shipping_option_mapping(
+            provider_id=provider_id,
+            pdx_option_external_id=option_id,
+            pdx_option_name=data.get("pdx_option_name", ""),
+            carrier_code=data.get("carrier_code", ""),
+            service_code=data.get("service_code", ""),
+            package_code=data.get("package_code", ""),
+            confirmation=data.get("confirmation", "none"),
+            pdx_carrier=data.get("pdx_carrier", ""),
+        )
+        return jsonify({"ok": True})
+
+    @app.route("/api/mark_ready_to_ship", methods=["POST"])
+    def mark_ready_to_ship():
+        """The automated counterpart to Mark Shipped — staff confirm the order
+        is actually printed and packed, Onsite creates the shipping label
+        itself (using the mapping configured for this order's PDX shipping
+        option) and reports the resulting tracking number to PDX. Exactly the
+        same safety rule as everywhere else: PDX must confirm success before
+        anything changes locally."""
+        data = request.get_json() or {}
+        order_num = data.get("order_num", "")
+        order = db.get_order(order_num)
+        if not order:
+            return jsonify({"ok": False, "error": "Order not found"})
+        if db.has_shipped_notification(order_num):
+            return jsonify({"ok": False, "error": "Order already marked shipped"})
+
+        provider = (db.get_shipping_provider(order["ship_provider_id"])
+                   if order.get("ship_provider_id") else db.get_enabled_shipping_provider())
+        if not provider:
+            return jsonify({"ok": False, "error": "No shipping provider configured"})
+
+        try:
+            raw = json.loads(order.get("raw_json") or "{}")
+        except Exception:
+            raw = {}
+        shipping = raw.get("shipping") or {}
+        option_external_id = (shipping.get("option") or {}).get("externalId", "")
+        mapping = db.get_shipping_option_mapping(provider["id"], option_external_id)
+        if not mapping or not mapping.get("carrier_code"):
+            return jsonify({"ok": False, "error":
+                           f"No shipping mapping configured for option \"{option_external_id}\" — "
+                           f"set one up in Settings, or use Mark Shipped instead"})
+
+        try:
+            adapter = shipping_providers.get_adapter(provider["provider_type"], provider["credentials"])
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)})
+
+        cfg = config.load()
+        external_order_id = order.get("ship_external_order_id")
+        if not external_order_id:
+            # Order-creation at ingestion didn't happen (provider added after
+            # this order arrived, or it failed at the time) — create it now.
+            external_order_id, err = adapter.create_order({
+                "order_num": order_num,
+                "placed_at": order.get("placed_at", ""),
+                "studio_name": cfg.get("studio_name", ""),
+                "destination": shipping.get("destination", {}),
+            })
+            if err:
+                return jsonify({"ok": False, "error": f"Could not create provider order: {err}"})
+            db.set_order_ship_provider(order_num, provider["id"], external_order_id)
+
+        ship_date = datetime.now().strftime("%Y-%m-%d")
+        result, err = adapter.create_label(
+            external_order_id, mapping["carrier_code"], mapping["service_code"],
+            mapping.get("package_code", ""), mapping.get("confirmation", "none"), ship_date,
+        )
+        if err:
+            _log(f"Ready to Ship failed for {order_num}: {err}", "error")
+            return jsonify({"ok": False, "error": err})
+
+        tracking_number = result.get("tracking_number", "")
+        ok, pdx_err = pdx_api.shipped_callback(cfg.get("lab_id", ""), cfg.get("api_key", ""), order_num,
+                                               carrier=mapping["pdx_carrier"], tracking_number=tracking_number)
+        if ok or pdx_api.is_already_shipped_error(pdx_err):
+            db.confirm_order(order_num)
+            db.record_shipped_notification(order_num, mapping["pdx_carrier"], tracking_number, provider["provider_type"])
+            push_event("order_confirmed", {"order_num": order_num})
+            _log(f"📦 Ready to ship: {order_num} ({mapping['pdx_carrier']} {tracking_number})")
+            return jsonify({"ok": True, "tracking_number": tracking_number, "carrier": mapping["pdx_carrier"]})
+        _log(f"Ready to Ship: label created for {order_num} but PDX rejected it — {pdx_err}", "error")
+        return jsonify({"ok": False, "error": f"Label created (tracking {tracking_number}) but PDX call failed: {pdx_err}"})
 
     # ── Job mode ───────────────────────────────────────────────────────────────
 

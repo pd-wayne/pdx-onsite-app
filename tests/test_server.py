@@ -712,3 +712,236 @@ class TestSystem:
     def test_image_not_found(self, client):
         resp = client.get("/api/image/ORD001/fake.jpg")
         assert resp.status_code in (404, 404)
+
+
+class TestShippingProviderEndpoints:
+    def test_catalog_includes_shipstation(self, client):
+        catalog = client.get("/api/get_shipping_provider_catalog").get_json()
+        assert any(p["provider_type"] == "shipstation" for p in catalog)
+
+    def test_empty_providers_list(self, client):
+        assert client.get("/api/get_shipping_providers").get_json() == []
+
+    def test_save_and_list_provider(self, client):
+        resp = client.post("/api/save_shipping_provider", data=json.dumps({
+            "provider_type": "shipstation", "label": "Bassetti ShipStation",
+            "credentials": {"api_key": "k", "api_secret": "s"}, "enabled": True,
+        }), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is True
+        providers = client.get("/api/get_shipping_providers").get_json()
+        assert len(providers) == 1
+        assert providers[0]["label"] == "Bassetti ShipStation"
+
+    def test_save_rejects_unknown_provider_type(self, client):
+        resp = client.post("/api/save_shipping_provider", data=json.dumps({
+            "provider_type": "not_real", "label": "X", "credentials": {},
+        }), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_update_existing_provider(self, client):
+        pid = client.post("/api/save_shipping_provider", data=json.dumps({
+            "provider_type": "shipstation", "label": "SS", "credentials": {"api_key": "k1", "api_secret": "s1"},
+        }), content_type="application/json").get_json()["id"]
+        client.post("/api/save_shipping_provider", data=json.dumps({
+            "id": pid, "provider_type": "shipstation", "label": "SS Renamed",
+            "credentials": {"api_key": "k2", "api_secret": "s2"},
+        }), content_type="application/json")
+        providers = client.get("/api/get_shipping_providers").get_json()
+        assert len(providers) == 1
+        assert providers[0]["label"] == "SS Renamed"
+
+    def test_delete_provider(self, client):
+        pid = client.post("/api/save_shipping_provider", data=json.dumps({
+            "provider_type": "shipstation", "label": "SS", "credentials": {},
+        }), content_type="application/json").get_json()["id"]
+        resp = client.post("/api/delete_shipping_provider", data=json.dumps({"id": pid}), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert client.get("/api/get_shipping_providers").get_json() == []
+
+    def _make_provider(self, client):
+        return client.post("/api/save_shipping_provider", data=json.dumps({
+            "provider_type": "shipstation", "label": "SS", "credentials": {"api_key": "k", "api_secret": "s"},
+        }), content_type="application/json").get_json()["id"]
+
+    def test_list_provider_carriers(self, client, monkeypatch):
+        import shipping_providers as sp
+        pid = self._make_provider(client)
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "list_carriers",
+                           lambda self: ([{"code": "ups", "name": "UPS"}], ""))
+        resp = client.get(f"/api/list_provider_carriers?provider_id={pid}")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["carriers"] == [{"code": "ups", "name": "UPS"}]
+
+    def test_list_provider_carriers_not_found(self, client):
+        resp = client.get("/api/list_provider_carriers?provider_id=999")
+        assert resp.get_json()["ok"] is False
+
+    def test_list_provider_services(self, client, monkeypatch):
+        import shipping_providers as sp
+        pid = self._make_provider(client)
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "list_services",
+                           lambda self, carrier_code: ([{"code": "ups_ground", "name": "UPS Ground"}], ""))
+        resp = client.get(f"/api/list_provider_services?provider_id={pid}&carrier_code=ups")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["services"] == [{"code": "ups_ground", "name": "UPS Ground"}]
+
+    def test_list_provider_services_requires_carrier_code(self, client):
+        pid = self._make_provider(client)
+        resp = client.get(f"/api/list_provider_services?provider_id={pid}")
+        assert resp.get_json()["ok"] is False
+
+    def test_list_provider_packages(self, client, monkeypatch):
+        import shipping_providers as sp
+        pid = self._make_provider(client)
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "list_packages",
+                           lambda self, carrier_code: ([{"code": "large_flat_rate_box", "name": "Large Flat Rate Box"}], ""))
+        resp = client.get(f"/api/list_provider_packages?provider_id={pid}&carrier_code=stamps_com")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["packages"][0]["code"] == "large_flat_rate_box"
+
+    def test_get_known_shipping_options(self, client):
+        db.upsert_order({"num": "ORD001", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "pdx_economy", "name": "Economy"},
+                                      "destination": {"recipient": "C"}}})
+        options = client.get("/api/get_known_shipping_options").get_json()
+        assert {"external_id": "pdx_economy", "name": "Economy"} in options
+
+    def test_save_and_get_shipping_option_mapping(self, client):
+        pid = self._make_provider(client)
+        resp = client.post("/api/save_shipping_option_mapping", data=json.dumps({
+            "provider_id": pid, "pdx_option_external_id": "pdx_economy", "pdx_option_name": "Economy",
+            "carrier_code": "stamps_com", "service_code": "usps_priority_mail",
+            "package_code": "large_flat_rate_box", "confirmation": "none", "pdx_carrier": "USPS",
+        }), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        mappings = client.get(f"/api/get_shipping_option_mappings?provider_id={pid}").get_json()
+        assert mappings[0]["pdx_carrier"] == "USPS"
+
+    def test_save_shipping_option_mapping_requires_fields(self, client):
+        resp = client.post("/api/save_shipping_option_mapping", data=json.dumps({}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_get_shipping_option_mappings_no_provider_id(self, client):
+        assert client.get("/api/get_shipping_option_mappings").get_json() == []
+
+
+class TestMarkReadyToShip:
+    def _order(self, num="ORD001", option_external_id="pdx_economy"):
+        return {
+            "num": num, "gallery": "G", "status": "received",
+            "placedAt": "2026-01-01T00:00:00Z", "items": [],
+            "shipping": {"option": {"externalId": option_external_id, "name": "Economy"},
+                        "destination": {"recipient": "Jane Doe", "address1": "123 Main St",
+                                       "city": "Orlando", "state": "FL", "zipCode": "32789"}},
+        }
+
+    def _provider_with_mapping(self, option_external_id="pdx_economy", pdx_carrier="USPS"):
+        pid = db.upsert_shipping_provider("shipstation", "SS", {"api_key": "k", "api_secret": "s"})
+        db.upsert_shipping_option_mapping(
+            pid, option_external_id, "Economy", "stamps_com", "usps_priority_mail", "", "none", pdx_carrier,
+        )
+        return pid
+
+    def test_order_not_found(self, client):
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "NOPE"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_already_shipped_is_rejected(self, client):
+        db.upsert_order(self._order())
+        db.record_shipped_notification("ORD001", "USPS", "9400", "manual")
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_no_provider_configured(self, client):
+        db.upsert_order(self._order())
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_no_mapping_for_shipping_option(self, client):
+        db.upsert_order(self._order(option_external_id="pdx_expedited"))
+        self._provider_with_mapping(option_external_id="pdx_economy")  # different option
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "mapping" in data["error"].lower()
+
+    def test_success_creates_order_and_label_and_confirms(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: ({"tracking_number": "9400123", "shipment_cost": 8.5, "label_data": ""}, ""))
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["tracking_number"] == "9400123"
+        assert data["carrier"] == "USPS"
+        assert db.has_shipped_notification("ORD001") is True
+        assert db.get_order("ORD001")["status"] == "fulfilled"
+
+    def test_reuses_existing_provider_order_id_without_recreating(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        pid = self._provider_with_mapping()
+        db.set_order_ship_provider("ORD001", pid, "999")
+        create_order_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order",
+                           lambda self, order: (create_order_calls.append(1), ("should not be used", ""))[1])
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: ({"tracking_number": "9400123"}, ""))
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert create_order_calls == []  # existing external_order_id was reused
+
+    def test_label_creation_failure_does_not_confirm(self, client, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", lambda self, *a, **k: (None, "carrier down"))
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+        assert db.has_shipped_notification("ORD001") is False
+        assert db.get_order("ORD001")["status"] == "received"
+
+    def test_pdx_rejection_does_not_confirm_but_label_already_bought(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: ({"tracking_number": "9400123"}, ""))
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (False, "HTTP 500"))
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "9400123" in data["error"]  # surfaced so staff can Mark Shipped manually with this tracking number
+        assert db.has_shipped_notification("ORD001") is False
+
+    def test_pdx_already_shipped_rejection_is_treated_as_success(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: ({"tracking_number": "9400123"}, ""))
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (False, "Order already shipped"))
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert db.has_shipped_notification("ORD001") is True
