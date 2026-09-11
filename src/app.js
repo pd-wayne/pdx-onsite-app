@@ -1237,6 +1237,12 @@ function appendLogLine(message, level="info", ts=null, scroll=true) {
   if (scroll) { const log = document.getElementById("activity-log"); log.scrollTop = log.scrollHeight; }
 }
 
+function exportLogs() {
+  // Same-origin GET with a Content-Disposition attachment header — the
+  // browser just downloads it, no fetch/blob plumbing needed.
+  window.location.href = "/api/export_logs";
+}
+
 function toggleLog() {
   state.logVisible = !state.logVisible;
   const log = document.getElementById("activity-log");

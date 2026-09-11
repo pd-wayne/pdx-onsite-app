@@ -493,13 +493,15 @@ body{display:flex;flex-direction:column}
 .log-msg{color:var(--text2)}
 .log-msg.error{color:var(--red)}
 .log-msg.warn{color:var(--amber)}
-#log-toggle{
+#log-toggle,#log-export{
   padding:2px 10px;font-size:10px;font-weight:600;font-family:var(--font);
   background:transparent;border:1px solid var(--border);border-radius:4px;
-  color:var(--text3);cursor:pointer;margin-left:auto;flex-shrink:0;
+  color:var(--text3);cursor:pointer;flex-shrink:0;
   transition:all var(--transition);
 }
-#log-toggle:hover{border-color:var(--border2);color:var(--text2)}
+#log-toggle{margin-left:auto}
+#log-export{margin-left:10px}
+#log-toggle:hover,#log-export:hover{border-color:var(--border2);color:var(--text2)}
 
 /* ── Toast ──────────────────────────────────────────────────────────────── */
 #toast-container{position:fixed;top:66px;right:18px;display:flex;flex-direction:column;gap:7px;z-index:9999;pointer-events:none}

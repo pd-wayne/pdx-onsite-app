@@ -1,13 +1,17 @@
 """
 server.py — Flask app for PDX Onsite
 """
+import io
 import json
 import logging
 import mimetypes
 import os
 import queue
+import sys
 import threading
 import tkinter as tk
+import zipfile
+from datetime import datetime
 from tkinter import filedialog
 from typing import Optional
 
@@ -657,6 +661,29 @@ def create_app(poller, ui_path: str) -> Flask:
     def activity_log():
         limit = int(request.args.get("limit", 50))
         return jsonify(db.get_activity_log(limit))
+
+    @app.route("/api/export_logs")
+    def export_logs():
+        """One-click bundle for non-technical staff to send us after an
+        incident: the full curated Activity Log (readable, unbounded — the
+        live panel only ever shows the last 50) plus the raw technical
+        pdx_onsite.log, zipped together. Nothing to hunt for on disk."""
+        app_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+            else os.path.dirname(os.path.abspath(__file__))
+        raw_log_path = os.path.join(app_dir, "pdx_onsite.log")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            lines = [f"{e['ts']}  [{e['level'].upper()}]  {e['message']}" for e in db.get_activity_log_all()]
+            zf.writestr("activity_log.txt", "\n".join(lines) if lines else "(empty)")
+            if os.path.exists(raw_log_path):
+                zf.write(raw_log_path, "pdx_onsite.log")
+            else:
+                zf.writestr("pdx_onsite.log", "(not found on this machine)")
+        buf.seek(0)
+        return send_file(buf, mimetype="application/zip", as_attachment=True,
+                         download_name=f"pdx_onsite_logs_{stamp}.zip")
 
     @app.route("/api/activity_log_write", methods=["POST"])
     def activity_log_write():
