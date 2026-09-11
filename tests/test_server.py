@@ -503,6 +503,62 @@ class TestMarkShipped:
         assert data["error"] == "bad api key"
         assert db.get_order("SHIP002")["status"] == "received"
 
+    def test_records_shipped_notification_for_dedup(self, client, monkeypatch):
+        """Regression test for a real bug found by code review: mark_shipped
+        confirmed the order but never wrote to shipped_notifications, so the
+        dedup log this session built specifically to prevent double-shipping
+        across paths (manual Mark Shipped vs. automated Ready to Ship) only
+        ever covered half of it."""
+        import api as pdx_api
+        db.upsert_order({"num": "SHIP003", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"}, "destination": {"recipient": "C"}}})
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        client.post("/api/mark_shipped",
+                   data=json.dumps({"order_num": "SHIP003", "carrier": "UPS", "tracking_number": "1Z1"}),
+                   content_type="application/json")
+        assert db.has_shipped_notification("SHIP003") is True
+
+    def test_rejects_an_order_already_shipped(self, client):
+        db.upsert_order({"num": "SHIP004", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"}, "destination": {"recipient": "C"}}})
+        db.record_shipped_notification("SHIP004", "UPS", "1Z1", "manual")
+
+        resp = client.post("/api/mark_shipped",
+                           data=json.dumps({"order_num": "SHIP004", "carrier": "FEDEX", "tracking_number": "999"}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_prevents_ready_to_ship_from_double_shipping_after_manual_mark(self, client, monkeypatch):
+        """The real end-to-end cross-path guarantee: an order manually marked
+        shipped through the actual /api/mark_shipped endpoint (not a direct
+        db insert) must block Ready to Ship from also buying a real label
+        for it — this is the exact scenario the shipped_notifications table
+        exists to prevent, and it silently didn't work until this fix."""
+        import api as pdx_api
+        import shipping_providers as sp
+        db.upsert_order({"num": "SHIP005", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "pdx_economy", "name": "Economy"},
+                                     "destination": {"recipient": "Jane Doe", "address1": "123 Main St",
+                                                    "city": "Orlando", "state": "FL", "zipCode": "32789"}}})
+        pid = db.upsert_shipping_provider("shipstation", "SS", {"api_key": "k", "api_secret": "s"})
+        db.upsert_shipping_option_mapping(pid, "pdx_economy", "Economy", "stamps_com", "usps_priority_mail", "", "none", "USPS")
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+        create_label_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: (create_label_calls.append(1), ({"tracking_number": "X"}, ""))[1])
+
+        client.post("/api/mark_shipped",
+                   data=json.dumps({"order_num": "SHIP005", "carrier": "UPS", "tracking_number": "1Z1"}),
+                   content_type="application/json")
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "SHIP005"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+        assert not create_label_calls  # no real label was purchased for the second path
+
 
 class TestReprintImagesResetsStatus:
     """Reprinting an item must reset its order_items status back to 'queued' so
@@ -775,11 +831,6 @@ class TestSystem:
             assert b"broadcast_test" in chunk1
             assert b"broadcast_test" in chunk2
 
-    def test_get_lan_info(self, client):
-        data = client.get("/api/get_lan_info").get_json()
-        assert data["lan_url"].startswith("http://")
-        assert data["lan_url"].endswith(":5050")
-
     def test_samples_list_no_folder(self, client):
         data = client.get("/api/samples/list").get_json()
         assert "files" in data
@@ -946,6 +997,65 @@ class TestMarkReadyToShip:
         assert data["ok"] is False
         assert "mapping" in data["error"].lower()
 
+    def test_rejects_mapping_with_no_pdx_carrier_before_buying_a_label(self, client, monkeypatch):
+        """Regression test for a real bug found by code review: a mapping can
+        have a real carrier_code/service_code set while pdx_carrier is left
+        "— Do not map —" (saved as null) in Settings. Without this check,
+        Ready to Ship would buy a real label, then fail the PDX callback
+        with carrier=None — a paid, orphaned label with nothing to show for
+        it. This must be caught before create_label is ever called."""
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        pid = db.upsert_shipping_provider("shipstation", "SS", {"api_key": "k", "api_secret": "s"})
+        db.upsert_shipping_option_mapping(pid, "pdx_economy", "Economy", "stamps_com", "usps_priority_mail", "", "none", None)
+        create_label_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: (create_label_calls.append(1), ({"tracking_number": "X"}, ""))[1])
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "PDX Carrier" in data["error"]
+        assert not create_label_calls
+
+    def test_concurrent_requests_for_the_same_order_only_buy_one_label(self, client, monkeypatch):
+        """Regression test for a real race found by code review: two
+        near-simultaneous requests for the same order (now a real
+        possibility with multi-station sharing one backend, or just a
+        double-click) used to both pass has_shipped_notification() before
+        either recorded it, each buying a real label. A lock around the
+        whole check-through-record section closes that window."""
+        import shipping_providers as sp
+        import api as pdx_api
+        import time
+
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+        create_label_calls = []
+
+        def slow_create_label(self, *a, **k):
+            create_label_calls.append(1)
+            time.sleep(0.15)  # widen the race window so both threads overlap
+            return {"tracking_number": "9400123"}, ""
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", slow_create_label)
+
+        results = []
+        def call():
+            resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+            results.append(resp.get_json())
+
+        t1 = threading.Thread(target=call)
+        t2 = threading.Thread(target=call)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        assert len(create_label_calls) == 1, "a real label must only ever be purchased once for the same order"
+        oks = [r["ok"] for r in results]
+        assert oks.count(True) == 1
+        assert oks.count(False) == 1
+
     def test_success_creates_order_and_label_and_confirms(self, client, monkeypatch):
         import shipping_providers as sp
         import api as pdx_api
@@ -1048,6 +1158,25 @@ class TestMultiStation:
         resp = client.post("/api/station/become_primary", json={})
         assert resp.get_json()["ok"] is False
 
+    def test_become_primary_fails_cleanly_when_lan_address_undeterminable(self, client, monkeypatch):
+        """Regression test for a real bug found by code review: get_lan_ip()
+        used to fall back to "127.0.0.1" on failure (e.g. no default
+        gateway — an isolated event LAN) instead of None. That address would
+        get broadcast as this station's own, and every other station trying
+        to join it would silently connect to their own loopback instead of
+        the real primary — undiscoverable and unexplained. Becoming primary
+        with no real address must fail loudly instead."""
+        import server as server_module
+        monkeypatch.setattr(server_module, "get_lan_ip", lambda: None)
+
+        resp = client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "network address" in data["error"].lower()
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "solo"  # never promoted
+
     def test_become_primary_sets_role(self, client):
         resp = client.post("/api/station/become_primary", json={"name": "Front Desk"})
         data = resp.get_json()
@@ -1066,13 +1195,27 @@ class TestMultiStation:
         assert client.get("/api/get_poller_status").get_json()["running"] is True
 
     def test_become_primary_preserves_other_settings(self, client):
-        """save_partial, not save() with a partial dict — a bare save()
-        would silently wipe lab_id/printer_name/etc. back to defaults."""
+        """config.save() merges onto the currently-saved config, not onto
+        bare DEFAULTS — otherwise this partial station-role update would
+        silently wipe lab_id/studio_name/etc. back to defaults."""
         client.post("/api/save_settings", json={"lab_id": "LAB1", "api_key": "KEY1", "studio_name": "My Studio"})
         client.post("/api/station/become_primary", json={"name": "Front Desk"})
         cfg = client.get("/api/get_settings").get_json()
         assert cfg["lab_id"] == "LAB1"
         assert cfg["studio_name"] == "My Studio"
+
+    def test_normal_settings_save_does_not_reset_station_role(self, client):
+        """Regression test for a real bug found by code review: the normal
+        Settings-page Save button only ever submits the settings-form fields
+        — it has no idea station_role/station_name exist — so saving
+        settings after becoming primary must not silently demote this
+        station back to solo."""
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        client.post("/api/save_settings", json={"lab_id": "LAB1", "api_key": "KEY1", "studio_name": "My Studio"})
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "primary"
+        assert info["name"] == "Front Desk"
 
     def test_become_primary_no_warning_when_nothing_else_found(self, client):
         client.post("/api/station/become_primary", json={"name": "Front Desk"})

@@ -89,10 +89,18 @@ class DiscoveryResponder:
                 continue
             try:
                 info = self._get_info() or {}
+                if not info.get("url"):
+                    # This station's own network address couldn't be
+                    # determined (see server.get_lan_ip) — replying with an
+                    # empty/loopback URL would be actively worse than not
+                    # replying: the asking station would silently store an
+                    # address that can never work instead of seeing "no
+                    # stations found" and the "check your network" hint.
+                    continue
                 reply = json.dumps({
                     "magic": MAGIC, "type": REPLY_TYPE,
                     "name": info.get("name", ""),
-                    "url": info.get("url", ""),
+                    "url": info["url"],
                     "studio_name": info.get("studio_name", ""),
                 })
                 self._sock.sendto(reply.encode("utf-8"), addr)

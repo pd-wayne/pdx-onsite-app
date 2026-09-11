@@ -46,6 +46,23 @@ class TestDiscoveryResponder:
 
         assert found[0]["name"] == "Renamed"
 
+    def test_does_not_reply_when_its_own_url_is_undeterminable(self):
+        """Regression test: replying with an empty/loopback URL when this
+        station's own network address couldn't be determined would be worse
+        than not replying — the asking station would silently store an
+        address that can never work instead of a clear "no stations found."""
+        responder = discovery.DiscoveryResponder(get_info=lambda: {
+            "name": "Front Desk", "url": None, "studio_name": "",
+        })
+        responder.start()
+        try:
+            time.sleep(0.2)
+            found = discovery.discover_stations(timeout=0.8, target="127.0.0.1")
+        finally:
+            responder.stop()
+
+        assert found == []
+
     def test_start_and_stop_are_idempotent(self):
         responder = discovery.DiscoveryResponder(get_info=lambda: {"name": "", "url": "", "studio_name": ""})
         responder.start()

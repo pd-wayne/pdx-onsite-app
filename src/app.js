@@ -1105,6 +1105,7 @@ async function loadSettings() {
   } catch(e) { console.warn("[Settings] routing load:", e); }
   try {
     const cfg = await apiGet("get_settings");
+    document.getElementById("s-api-environment").value = cfg.api_environment || "production";
     document.getElementById("s-lab-id").value = cfg.lab_id || "";
     document.getElementById("s-api-key").value = cfg.api_key || "";
     document.getElementById("s-studio-name").value = cfg.studio_name || "";
@@ -1367,6 +1368,7 @@ async function saveSettings() {
   const printerSel    = document.getElementById("s-printer-name").value;
   const printerManual = document.getElementById("s-printer-manual")?.value.trim() || "";
   const cfg = {
+    api_environment:      document.getElementById("s-api-environment").value,
     lab_id:               document.getElementById("s-lab-id").value.trim(),
     api_key:              document.getElementById("s-api-key").value.trim(),
     studio_name:          document.getElementById("s-studio-name").value.trim(),
@@ -1409,7 +1411,8 @@ async function testConnection() {
   el.textContent = "Testing…"; el.className = "";
   const result = await apiPost("test_connection", {
     lab_id:  document.getElementById("s-lab-id").value.trim(),
-    api_key: document.getElementById("s-api-key").value.trim()
+    api_key: document.getElementById("s-api-key").value.trim(),
+    api_environment: document.getElementById("s-api-environment").value
   });
   el.className = result.ok ? "result-ok" : "result-err";
   el.textContent = result.ok ? `✓ ${result.message}` : `✗ ${result.message}`;

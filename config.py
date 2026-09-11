@@ -30,17 +30,8 @@ DEFAULTS = {
     "station_role": "solo",         # "solo" | "primary" | "secondary" — see discovery.py
     "station_name": "",
     "joined_primary_url": "",       # secondary only — last-known address of the primary it joined
+    "api_environment": "production",  # "production" | "staging" — see api.py get_base_url()
 }
-
-
-def save_partial(patch: dict) -> bool:
-    """Merge `patch` onto the CURRENTLY SAVED config and write the result.
-    save() replaces anything missing from its argument with DEFAULTS, which
-    is safe only because the Settings page always submits every field at
-    once — anything touching just a couple of keys (the station-role
-    endpoints) must go through this instead, or it would silently reset
-    everything else (lab_id, api_key, printer_name, ...) back to defaults."""
-    return save({**load(), **patch})
 
 
 def load() -> dict:
@@ -55,8 +46,16 @@ def load() -> dict:
 
 
 def save(data: dict) -> bool:
+    """Merges `data` onto the CURRENTLY SAVED config, not onto bare DEFAULTS —
+    a partial dict (anything not touching every key) must never silently
+    reset the fields it didn't mention. This used to merge onto DEFAULTS
+    instead, on the assumption every caller always submits the full settings
+    object; the multi-station feature broke that assumption (a plain
+    Settings-page Save doesn't know about station_role/station_name/
+    joined_primary_url, so it was wiping them back to "solo" every time) —
+    found by code review, not by a caller actually hitting it in the wild."""
     try:
-        cfg = {**DEFAULTS, **data}
+        cfg = {**load(), **data}
         with open(CONFIG_PATH, "w") as f:
             json.dump(cfg, f, indent=2)
         return True

@@ -34,6 +34,13 @@ log = logging.getLogger("pdx.server")
 # updates the other happened to dequeue first.
 _sse_clients: list = []
 _sse_clients_lock = threading.Lock()
+# Serializes mark_shipped / mark_ready_to_ship end to end (check → external
+# calls → record). Without this, two near-simultaneous requests for the same
+# order (now a real possibility with multi-station sharing one backend, or
+# just a double-click) both pass has_shipped_notification() before either
+# writes it, and each buys a real shipping label. A single coarse lock is
+# fine here — this is a staff button click, not a hot path.
+_shipping_action_lock = threading.Lock()
 SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"}
 MAX_LOGO_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 _pending_update: Optional[dict] = None
@@ -44,19 +51,33 @@ def set_pending_update(info: dict):
     _pending_update = info
 
 
-def get_lan_ip() -> str:
+def get_lan_ip() -> Optional[str]:
     """Best-effort LAN address for this machine, shown to staff so a second
     station can point a browser at it. Doesn't actually send any traffic —
     opening a UDP socket to a public IP just makes the OS pick the outbound
-    interface, which is all we need the address of."""
+    interface, which is all we need the address of.
+
+    Returns None on failure (e.g. no default route/gateway — an isolated
+    event LAN, or outbound UDP blocked) — NOT "127.0.0.1". A loopback
+    fallback used to be returned here, which is actively worse than no
+    answer: a second station would silently store its own loopback address
+    as "the primary" and never reach it, with nothing to explain why."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
         return s.getsockname()[0]
     except Exception:
-        return "127.0.0.1"
+        return None
     finally:
         s.close()
+
+
+def get_lan_url() -> Optional[str]:
+    """This station's own address, or None if it couldn't be determined —
+    see get_lan_ip. Centralizes the URL string (port 5050) instead of every
+    call site rebuilding it by hand."""
+    ip = get_lan_ip()
+    return f"http://{ip}:5050" if ip else None
 
 
 def push_event(event: str, data: dict):
@@ -100,14 +121,14 @@ def create_app(poller, ui_path: str = "") -> Flask:
     # ── Multi-station (same-location, onsite-only workflow) ─────────────────
     discovery_responder = discovery.DiscoveryResponder(get_info=lambda: {
         "name": config.load().get("station_name", ""),
-        "url": f"http://{get_lan_ip()}:5050",
+        "url": get_lan_url(),
         "studio_name": config.load().get("studio_name", ""),
     })
     if cfg.get("station_role") == "primary":
         discovery_responder.start()
 
     def _start_as_primary(name: str):
-        config.save_partial({"station_role": "primary", "station_name": name, "joined_primary_url": ""})
+        config.save({"station_role": "primary", "station_name": name, "joined_primary_url": ""})
         c = config.load()
         if c.get("lab_id") and c.get("api_key"):
             poller.configure(c["lab_id"], c["api_key"], int(c.get("poll_interval", 60)))
@@ -165,14 +186,6 @@ def create_app(poller, ui_path: str = "") -> Flask:
         return Response(generate(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.route("/api/get_lan_info")
-    def get_lan_info():
-        """So non-technical staff can read the address off screen instead of
-        needing to run ipconfig — see the "same-location multi-station"
-        workflow: one station runs the real backend, others just point a
-        browser at this URL."""
-        return jsonify({"lan_url": f"http://{get_lan_ip()}:5050"})
-
     @app.route("/api/station/info")
     def station_info():
         c = config.load()
@@ -180,13 +193,13 @@ def create_app(poller, ui_path: str = "") -> Flask:
             "role": c.get("station_role", "solo"),
             "name": c.get("station_name", ""),
             "joined_primary_url": c.get("joined_primary_url", ""),
-            "lan_url": f"http://{get_lan_ip()}:5050",
+            "lan_url": get_lan_url(),  # None if it couldn't be determined — see get_lan_ip
             "studio_name": c.get("studio_name", ""),
         })
 
     @app.route("/api/station/discover")
     def station_discover():
-        my_url = f"http://{get_lan_ip()}:5050"
+        my_url = get_lan_url()
         stations = [s for s in discovery.discover_stations() if s["url"] != my_url]
         return jsonify({"stations": stations})
 
@@ -206,7 +219,14 @@ def create_app(poller, ui_path: str = "") -> Flask:
         if not name:
             return jsonify({"ok": False, "error": "Station name is required"})
 
-        my_url = f"http://{get_lan_ip()}:5050"
+        my_url = get_lan_url()
+        if not my_url:
+            # Becoming primary with no determinable address defeats the
+            # whole point — no other station could ever find or connect to
+            # this one, and it would silently announce a broken address to
+            # anyone who tries (see discovery.py's matching guard).
+            return jsonify({"ok": False, "error":
+                           "Could not determine this computer's network address — check its WiFi/network connection and try again."})
         others = [s for s in discovery.discover_stations() if s.get("name") and s["url"] != my_url]
 
         if others:
@@ -243,7 +263,7 @@ def create_app(poller, ui_path: str = "") -> Flask:
         if not name or not primary_url:
             return jsonify({"ok": False, "error": "Station name and a station to join are required"})
         _stop_being_primary()
-        config.save_partial({"station_role": "secondary", "station_name": name, "joined_primary_url": primary_url})
+        config.save({"station_role": "secondary", "station_name": name, "joined_primary_url": primary_url})
         _log(f"🔗 This station joined \"{primary_name or primary_url}\" as \"{name}\"")
         return jsonify({"ok": True})
 
@@ -263,7 +283,7 @@ def create_app(poller, ui_path: str = "") -> Flask:
 
         my_name = c.get("station_name", "")
         _stop_being_primary()
-        config.save_partial({"station_role": "secondary", "station_name": my_name, "joined_primary_url": new_primary_url})
+        config.save({"station_role": "secondary", "station_name": my_name, "joined_primary_url": new_primary_url})
         _log(f"⬇ Stepped down as main station — \"{new_primary_name or new_primary_url}\" is now primary")
         push_event("station_demoted", {"redirect_url": f"{new_primary_url}?station={my_name}"})
         return jsonify({"ok": True})
@@ -271,7 +291,7 @@ def create_app(poller, ui_path: str = "") -> Flask:
     @app.route("/api/station/reset_to_solo", methods=["POST"])
     def station_reset_to_solo():
         _stop_being_primary()
-        config.save_partial({"station_role": "solo", "station_name": "", "joined_primary_url": ""})
+        config.save({"station_role": "solo", "station_name": "", "joined_primary_url": ""})
         _log("Station reset to standalone (solo) mode")
         return jsonify({"ok": True})
 
@@ -304,7 +324,8 @@ def create_app(poller, ui_path: str = "") -> Flask:
     @app.route("/api/test_connection", methods=["POST"])
     def test_connection():
         data = request.get_json()
-        ok, msg = pdx_api.test_connection(data.get("lab_id", ""), data.get("api_key", ""))
+        ok, msg = pdx_api.test_connection(data.get("lab_id", ""), data.get("api_key", ""),
+                                          environment=data.get("api_environment"))
         return jsonify({"ok": ok, "message": msg})
 
     @app.route("/api/get_printers")
@@ -632,69 +653,82 @@ def create_app(poller, ui_path: str = "") -> Flask:
         anything changes locally."""
         data = request.get_json() or {}
         order_num = data.get("order_num", "")
-        order = db.get_order(order_num)
-        if not order:
-            return jsonify({"ok": False, "error": "Order not found"})
-        if db.has_shipped_notification(order_num):
-            return jsonify({"ok": False, "error": "Order already marked shipped"})
+        # Locked end-to-end: without this, two near-simultaneous requests for
+        # the same order (multi-station, or a double-click) could both pass
+        # the has_shipped_notification check below before either records it,
+        # and each buy a real shipping label.
+        with _shipping_action_lock:
+            order = db.get_order(order_num)
+            if not order:
+                return jsonify({"ok": False, "error": "Order not found"})
+            if db.has_shipped_notification(order_num):
+                return jsonify({"ok": False, "error": "Order already marked shipped"})
 
-        provider = (db.get_shipping_provider(order["ship_provider_id"])
-                   if order.get("ship_provider_id") else db.get_enabled_shipping_provider())
-        if not provider:
-            return jsonify({"ok": False, "error": "No shipping provider configured"})
+            provider = (db.get_shipping_provider(order["ship_provider_id"])
+                       if order.get("ship_provider_id") else db.get_enabled_shipping_provider())
+            if not provider:
+                return jsonify({"ok": False, "error": "No shipping provider configured"})
 
-        try:
-            raw = json.loads(order.get("raw_json") or "{}")
-        except Exception:
-            raw = {}
-        shipping = raw.get("shipping") or {}
-        option_external_id = (shipping.get("option") or {}).get("externalId", "")
-        mapping = db.get_shipping_option_mapping(provider["id"], option_external_id)
-        if not mapping or not mapping.get("carrier_code"):
-            return jsonify({"ok": False, "error":
-                           f"No shipping mapping configured for option \"{option_external_id}\" — "
-                           f"set one up in Settings, or use Mark Shipped instead"})
+            try:
+                raw = json.loads(order.get("raw_json") or "{}")
+            except Exception:
+                raw = {}
+            shipping = raw.get("shipping") or {}
+            option_external_id = (shipping.get("option") or {}).get("externalId", "")
+            mapping = db.get_shipping_option_mapping(provider["id"], option_external_id)
+            if not mapping or not mapping.get("carrier_code"):
+                return jsonify({"ok": False, "error":
+                               f"No shipping mapping configured for option \"{option_external_id}\" — "
+                               f"set one up in Settings, or use Mark Shipped instead"})
+            if not mapping.get("pdx_carrier"):
+                # A real label must never get purchased for a mapping that can't
+                # actually report back to PDX — carrier_code alone (ShipStation's
+                # side) isn't enough; pdx_carrier (what gets sent to PDX) can be
+                # left "— Do not map —" in Settings, which saves it as null.
+                return jsonify({"ok": False, "error":
+                               f"Shipping option \"{option_external_id}\" is mapped to a carrier but not a PDX Carrier — "
+                               f"finish that mapping in Settings, or use Mark Shipped instead"})
 
-        try:
-            adapter = shipping_providers.get_adapter(provider["provider_type"], provider["credentials"])
-        except ValueError as e:
-            return jsonify({"ok": False, "error": str(e)})
+            try:
+                adapter = shipping_providers.get_adapter(provider["provider_type"], provider["credentials"])
+            except ValueError as e:
+                return jsonify({"ok": False, "error": str(e)})
 
-        cfg = config.load()
-        external_order_id = order.get("ship_external_order_id")
-        if not external_order_id:
-            # Order-creation at ingestion didn't happen (provider added after
-            # this order arrived, or it failed at the time) — create it now.
-            external_order_id, err = adapter.create_order({
-                "order_num": order_num,
-                "placed_at": order.get("placed_at", ""),
-                "studio_name": cfg.get("studio_name", ""),
-                "destination": shipping.get("destination", {}),
-            })
+            cfg = config.load()
+            external_order_id = order.get("ship_external_order_id")
+            if not external_order_id:
+                # Order-creation at ingestion didn't happen (provider added after
+                # this order arrived, or it failed at the time) — create it now.
+                external_order_id, err = adapter.create_order({
+                    "order_num": order_num,
+                    "placed_at": order.get("placed_at", ""),
+                    "studio_name": cfg.get("studio_name", ""),
+                    "destination": shipping.get("destination", {}),
+                })
+                if err:
+                    return jsonify({"ok": False, "error": f"Could not create provider order: {err}"})
+                db.set_order_ship_provider(order_num, provider["id"], external_order_id)
+
+            ship_date = datetime.now().strftime("%Y-%m-%d")
+            result, err = adapter.create_label(
+                external_order_id, mapping["carrier_code"], mapping["service_code"],
+                mapping.get("package_code", ""), mapping.get("confirmation", "none"), ship_date,
+            )
             if err:
-                return jsonify({"ok": False, "error": f"Could not create provider order: {err}"})
-            db.set_order_ship_provider(order_num, provider["id"], external_order_id)
+                _log(f"Ready to Ship failed for {order_num}: {err}", "error")
+                return jsonify({"ok": False, "error": err})
 
-        ship_date = datetime.now().strftime("%Y-%m-%d")
-        result, err = adapter.create_label(
-            external_order_id, mapping["carrier_code"], mapping["service_code"],
-            mapping.get("package_code", ""), mapping.get("confirmation", "none"), ship_date,
-        )
-        if err:
-            _log(f"Ready to Ship failed for {order_num}: {err}", "error")
-            return jsonify({"ok": False, "error": err})
-
-        tracking_number = result.get("tracking_number", "")
-        ok, pdx_err = pdx_api.shipped_callback(cfg.get("lab_id", ""), cfg.get("api_key", ""), order_num,
-                                               carrier=mapping["pdx_carrier"], tracking_number=tracking_number)
-        if ok or pdx_api.is_already_shipped_error(pdx_err):
-            db.confirm_order(order_num)
-            db.record_shipped_notification(order_num, mapping["pdx_carrier"], tracking_number, provider["provider_type"])
-            push_event("order_confirmed", {"order_num": order_num})
-            _log(f"📦 Ready to ship: {order_num} ({mapping['pdx_carrier']} {tracking_number})")
-            return jsonify({"ok": True, "tracking_number": tracking_number, "carrier": mapping["pdx_carrier"]})
-        _log(f"Ready to Ship: label created for {order_num} but PDX rejected it — {pdx_err}", "error")
-        return jsonify({"ok": False, "error": f"Label created (tracking {tracking_number}) but PDX call failed: {pdx_err}"})
+            tracking_number = result.get("tracking_number", "")
+            ok, pdx_err = pdx_api.shipped_callback(cfg.get("lab_id", ""), cfg.get("api_key", ""), order_num,
+                                                   carrier=mapping["pdx_carrier"], tracking_number=tracking_number)
+            if ok or pdx_api.is_already_shipped_error(pdx_err):
+                db.confirm_order(order_num)
+                db.record_shipped_notification(order_num, mapping["pdx_carrier"], tracking_number, provider["provider_type"])
+                push_event("order_confirmed", {"order_num": order_num})
+                _log(f"📦 Ready to ship: {order_num} ({mapping['pdx_carrier']} {tracking_number})")
+                return jsonify({"ok": True, "tracking_number": tracking_number, "carrier": mapping["pdx_carrier"]})
+            _log(f"Ready to Ship: label created for {order_num} but PDX rejected it — {pdx_err}", "error")
+            return jsonify({"ok": False, "error": f"Label created (tracking {tracking_number}) but PDX call failed: {pdx_err}"})
 
     # ── Job mode ───────────────────────────────────────────────────────────────
 
@@ -779,16 +813,23 @@ def create_app(poller, ui_path: str = "") -> Flask:
             return jsonify({"ok": False, "error": f"Invalid carrier — must be one of {', '.join(sorted(VALID_CARRIERS))}"})
         if not tracking_number and carrier != "PICKUP":
             return jsonify({"ok": False, "error": "Tracking number is required"})
-        cfg = config.load()
-        ok, err = pdx_api.shipped_callback(cfg.get("lab_id", ""), cfg.get("api_key", ""),
-                                           order_num, carrier=carrier, tracking_number=tracking_number)
-        if not ok:
-            _log(f"Mark shipped failed for {order_num}: {err}", "error")
-            return jsonify({"ok": False, "error": err})
-        db.confirm_order(order_num)
-        _log(f"📦 Shipped ({carrier} {tracking_number}): {order_num}")
-        push_event("order_confirmed", {"order_num": order_num})
-        return jsonify({"ok": True})
+        # Same lock + dedup log Ready to Ship uses — without both, a station
+        # that already shipped this order via the automated flow (or another
+        # station, if multi-station is set up) could re-report it here too.
+        with _shipping_action_lock:
+            if db.has_shipped_notification(order_num):
+                return jsonify({"ok": False, "error": "Order already marked shipped"})
+            cfg = config.load()
+            ok, err = pdx_api.shipped_callback(cfg.get("lab_id", ""), cfg.get("api_key", ""),
+                                               order_num, carrier=carrier, tracking_number=tracking_number)
+            if not ok:
+                _log(f"Mark shipped failed for {order_num}: {err}", "error")
+                return jsonify({"ok": False, "error": err})
+            db.confirm_order(order_num)
+            db.record_shipped_notification(order_num, carrier, tracking_number, "manual")
+            _log(f"📦 Shipped ({carrier} {tracking_number}): {order_num}{_station_tag()}")
+            push_event("order_confirmed", {"order_num": order_num})
+            return jsonify({"ok": True})
 
     @app.route("/api/fulfill_order", methods=["POST"])
     def fulfill_order():
