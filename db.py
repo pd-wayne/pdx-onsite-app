@@ -198,6 +198,16 @@ def get_activity_log(limit: int = 50) -> list:
         return [dict(r) for r in reversed(rows)]
 
 
+def get_activity_log_all() -> list:
+    """Full, unbounded history — used for export, never for the live UI panel
+    (which only ever needs the recent window get_activity_log gives it)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT ts, level, message FROM activity_log ORDER BY id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 # ── Orders ────────────────────────────────────────────────────────────────────
 
 def upsert_order(order_data: dict) -> bool:

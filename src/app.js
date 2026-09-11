@@ -29,17 +29,35 @@ async function apiGet(path, params = {}) {
   return r.json();
 }
 async function apiPost(path, body = {}) {
-  const r = await fetch("/api/" + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const headers = { "Content-Type": "application/json" };
+  // Attribution: when this browser is viewing a shared primary as a named
+  // secondary station (?station=NAME), tag every mutating call so the
+  // Activity Log can show which physical station did what.
+  if (state.viewingAsStation) headers["X-Station-Name"] = state.viewingAsStation;
+  const r = await fetch("/api/" + path, { method: "POST", headers, body: JSON.stringify(body) });
   return r.json();
 }
 
 // ── SSE ────────────────────────────────────────────────────────────────────
 function initSSE() {
   const es = new EventSource("/api/events");
+  es.onopen = () => {
+    if (state._stationWasDisconnected) {
+      state._stationWasDisconnected = false;
+      hideStationReconnectBanner();
+      toast("Reconnected", "success");
+      refreshAll();
+      loadActivityLog();
+    }
+  };
   es.onmessage = (e) => {
     try {
       const { event, data } = JSON.parse(e.data);
       if (event === "new_orders") { toast(`📦 ${data.count} new order(s)`, "info"); refreshAll(); }
+      else if (event === "station_demoted") {
+        toast("This station is no longer the main station — redirecting…", "info");
+        setTimeout(() => { window.location.href = data.redirect_url; }, 800);
+      }
       else if (event === "poll_complete") updatePollerStatus();
       else if (event === "download_done") refreshQueue();
       else if (event === "poll_error") { setApiStatus(false, data.error); updatePollerStatus(); }
@@ -61,7 +79,30 @@ function initSSE() {
       }
     } catch(e) { console.warn("[SSE]", e); }
   };
-  es.onerror = () => console.warn("[SSE] reconnecting…");
+  es.onerror = () => {
+    console.warn("[SSE] reconnecting…");
+    // Only meaningful for a secondary — losing the connection there means
+    // losing the actual backend (queue, printer, poller all live elsewhere).
+    // The browser's EventSource retries automatically; this just keeps
+    // staff informed instead of the screen silently going stale.
+    if (state.stationInfo?.role === "secondary") {
+      state._stationWasDisconnected = true;
+      showStationReconnectBanner();
+    }
+  };
+}
+
+function showStationReconnectBanner() {
+  const banner = document.getElementById("station-reconnect-banner");
+  const text = document.getElementById("station-reconnect-text");
+  if (!banner) return;
+  if (text) text.textContent = "Lost connection to the main station — showing the last data we had, reconnecting…";
+  banner.style.display = "flex";
+}
+
+function hideStationReconnectBanner() {
+  const banner = document.getElementById("station-reconnect-banner");
+  if (banner) banner.style.display = "none";
 }
 
 // ── Navigation ─────────────────────────────────────────────────────────────
@@ -1024,7 +1065,7 @@ function applySettingsView(view) {
   });
   const hideOnsiteOnly = view === "in_studio";
   ["settings-onsite-only-logo", "settings-onsite-only-samples", "settings-onsite-only-unclaimed",
-   "settings-onsite-only-receipt-printer"].forEach(id => {
+   "settings-onsite-only-receipt-printer", "settings-onsite-only-lan-share"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.style.display = hideOnsiteOnly ? "none" : "";
   });
@@ -1060,7 +1101,7 @@ function initSettingsView() {
 async function loadSettings() {
   initSettingsView();
   try {
-    await Promise.all([loadDestinations(), loadRouting(), loadShippingProviders()]);
+    await Promise.all([loadDestinations(), loadRouting(), loadShippingProviders(), loadStationInfo()]);
   } catch(e) { console.warn("[Settings] routing load:", e); }
   try {
     const cfg = await apiGet("get_settings");
@@ -1084,6 +1125,227 @@ async function loadSettings() {
       document.getElementById("printer-manual-row").style.display = "block";
     });
   } catch(e) { toast("Could not load settings", "error"); }
+}
+
+// ── Multi-station (same-location, onsite-only workflow) ─────────────────────
+// One backend at a time (the primary) — every other station is just a
+// labeled window into it. state.stationInfo describes what THIS backend is;
+// state.viewingAsStation (from ?station=NAME) describes who's looking at it
+// through this particular browser tab, which may be a different machine
+// entirely once a secondary has navigated over to the primary's own page.
+let _msWizardStep = "idle"; // "idle" | "choose_role" | "searching" | "pick_station" | "name_secondary"
+let _msDiscovered = [];
+let _msPickedPrimary = null;
+
+async function loadStationInfo() {
+  try {
+    state.stationInfo = await apiGet("station/info");
+  } catch(e) {
+    state.stationInfo = { role: "solo", name: "", joined_primary_url: "", lan_url: "", studio_name: "" };
+  }
+  state.viewingAsStation = new URLSearchParams(location.search).get("station") || "";
+  renderStationBadge();
+  applyStationRoleVisibility();
+  renderMultiStationSettings();
+}
+
+function renderStationBadge() {
+  const badge = document.getElementById("station-badge");
+  if (!badge) return;
+  const info = state.stationInfo || {};
+  if (info.role === "primary") {
+    badge.style.display = "";
+    badge.style.color = "var(--red)";
+    badge.title = "Closing this station disconnects every other station connected to it.";
+    badge.textContent = `🔷 MAIN STATION — "${info.name}"`;
+  } else if (state.viewingAsStation) {
+    badge.style.display = "";
+    badge.style.color = "var(--text2)";
+    badge.title = "";
+    badge.textContent = `🔗 ${state.viewingAsStation} · connected to "${info.name || info.studio_name || "main station"}"`;
+  } else {
+    badge.style.display = "none";
+  }
+}
+
+function applyStationRoleVisibility() {
+  const isSecondary = state.stationInfo?.role === "secondary";
+  const navStation = document.getElementById("nav-secondary-only-station");
+  const navQueue   = document.getElementById("nav-queue");
+  const navScan    = document.getElementById("nav-onsite-only-scan");
+  const navSamples = document.getElementById("nav-onsite-only-samples");
+  if (navStation) navStation.style.display = isSecondary ? "" : "none";
+  // A secondary has no live data of its own — hide panels that would
+  // otherwise show empty/stale local content instead of the real thing.
+  [navQueue, navScan, navSamples].forEach(el => { if (el) el.style.display = isSecondary ? "none" : ""; });
+
+  if (isSecondary) {
+    const info = state.stationInfo || {};
+    const el = document.getElementById("station-connected-info");
+    if (el) el.innerHTML = `<div style="font-size:14px">🔗 This station ("${esc(info.name)}") is connected to the main station.</div>`;
+    showPanel("station", navStation);
+  }
+}
+
+function openPrimaryQueue() {
+  const info = state.stationInfo || {};
+  if (!info.joined_primary_url) return;
+  window.location.href = `${info.joined_primary_url}?station=${encodeURIComponent(info.name || "")}`;
+}
+
+async function _msBecomePrimary(name) {
+  const result = await apiPost("station/become_primary", { name });
+  if (!result.ok) { toast(`Could not become the main station: ${result.error}`, "error"); return false; }
+  if (result.other_primary_found) {
+    toast(`Warning: "${result.other_primary_found.name}" was also active on this network and couldn't be reached to hand off cleanly — this may cause a one-time duplicate print. Logged for review.`, "error", 8000);
+  } else {
+    toast(`"${name}" is now the main station`, "success");
+  }
+  await loadStationInfo();
+  await loadSettings();
+  return true;
+}
+
+async function promoteThisStation() {
+  const info = state.stationInfo || {};
+  const name = prompt('Name this station (e.g. "Front Desk"):', info.name || "");
+  if (!name || !name.trim()) return;
+  if (!confirm(`Make "${name.trim()}" the main station? It will start printing and downloading independently. If another station is currently main and reachable, it will be asked to step down first; if it can't be reached, this proceeds anyway and may cause a one-time duplicate print for anything already in progress there.`)) return;
+  await _msBecomePrimary(name.trim());
+}
+
+async function resetStationToSolo() {
+  if (!confirm("Disconnect this station and run it on its own? Any existing multi-station setup on this machine will be cleared.")) return;
+  const result = await apiPost("station/reset_to_solo", {});
+  if (result.ok) {
+    toast("Station reset to standalone", "success");
+    await loadStationInfo();
+    await loadSettings();
+  } else {
+    toast(`Reset failed: ${result.error}`, "error");
+  }
+}
+
+function renderMultiStationSettings() {
+  const wrap = document.getElementById("multistation-content");
+  if (!wrap) return;
+  const info = state.stationInfo || { role: "solo" };
+
+  if (info.role === "primary") {
+    wrap.innerHTML = `
+      <div class="form-hint" style="margin-bottom:10px;color:var(--red)">
+        🔷 This is your MAIN station — "${esc(info.name)}". Closing this disconnects every other station connected to it.
+      </div>
+      <button class="btn-secondary" onclick="resetStationToSolo()">Reset to standalone</button>`;
+    return;
+  }
+
+  if (info.role === "secondary") {
+    wrap.innerHTML = `
+      <div class="form-hint">
+        🔗 Connected as "${esc(info.name)}". Manage this from <a href="#" onclick="showPanel('station', document.getElementById('nav-secondary-only-station'));return false;">This Station</a> in the sidebar.
+      </div>`;
+    return;
+  }
+
+  // role === "solo" — the guided entry point
+  if (_msWizardStep === "idle") {
+    wrap.innerHTML = `
+      <div class="form-hint" style="margin-bottom:8px">Running more than one station for this event?</div>
+      <button class="btn-secondary" onclick="_msStep('choose_role')">+ Set up multi-station</button>`;
+    return;
+  }
+
+  if (_msWizardStep === "choose_role") {
+    wrap.innerHTML = `
+      <div class="form-hint" style="margin-bottom:10px">Is this your main station — the one with the printer?</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn-primary" onclick="msWizardBecomePrimary()">This is my main station</button>
+        <button class="btn-secondary" onclick="msWizardSearch()">I'm adding another station</button>
+      </div>
+      <button class="btn-xs btn-xs-ghost" style="margin-top:10px" onclick="_msStep('idle')">Cancel</button>`;
+    return;
+  }
+
+  if (_msWizardStep === "searching") {
+    wrap.innerHTML = `<div class="form-hint">🔍 Searching for stations on this network…</div>`;
+    return;
+  }
+
+  if (_msWizardStep === "pick_station") {
+    if (!_msDiscovered.length) {
+      wrap.innerHTML = `
+        <div class="form-hint" style="margin-bottom:10px;color:var(--amber)">
+          No stations found. Make sure your main station's app is open and both computers are on the same WiFi/network.
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn-secondary" onclick="msWizardSearch()">Retry</button>
+          <button class="btn-xs btn-xs-ghost" onclick="_msStep('idle')">Cancel</button>
+        </div>`;
+      return;
+    }
+    wrap.innerHTML = `
+      <div class="form-hint" style="margin-bottom:10px">Found ${_msDiscovered.length} station(s):</div>
+      <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">
+        ${_msDiscovered.map((s, i) => `
+          <button class="btn-secondary" style="text-align:left" onclick="msWizardPickStation(${i})">
+            ${esc(s.name)}${s.studio_name ? ` <span style="color:var(--text3);font-size:11px">(${esc(s.studio_name)})</span>` : ""}
+          </button>`).join("")}
+      </div>
+      <button class="btn-xs btn-xs-ghost" onclick="_msStep('idle')">Cancel</button>`;
+    return;
+  }
+
+  if (_msWizardStep === "name_secondary") {
+    wrap.innerHTML = `
+      <div class="form-hint" style="margin-bottom:8px">Name THIS station (e.g. "Check-in 2"):</div>
+      <div class="form-row-inline" style="gap:8px">
+        <input class="form-input" id="ms-secondary-name" placeholder="Check-in 2" style="flex:1">
+        <button class="btn-primary" onclick="msWizardJoin()">Connect</button>
+      </div>
+      <button class="btn-xs btn-xs-ghost" style="margin-top:10px" onclick="_msStep('idle')">Cancel</button>`;
+    return;
+  }
+}
+
+function _msStep(step) {
+  _msWizardStep = step;
+  if (step === "idle") { _msDiscovered = []; _msPickedPrimary = null; }
+  renderMultiStationSettings();
+}
+
+async function msWizardBecomePrimary() {
+  const name = prompt('Name this station (e.g. "Front Desk"):', "");
+  if (!name || !name.trim()) return;
+  const ok = await _msBecomePrimary(name.trim());
+  if (ok) _msStep("idle");
+}
+
+async function msWizardSearch() {
+  _msStep("searching");
+  const result = await apiGet("station/discover");
+  _msDiscovered = result.stations || [];
+  _msWizardStep = "pick_station";
+  renderMultiStationSettings();
+}
+
+function msWizardPickStation(i) {
+  _msPickedPrimary = _msDiscovered[i];
+  _msWizardStep = "name_secondary";
+  renderMultiStationSettings();
+  setTimeout(() => document.getElementById("ms-secondary-name")?.focus(), 0);
+}
+
+async function msWizardJoin() {
+  const name = document.getElementById("ms-secondary-name")?.value.trim();
+  if (!name) { toast("Enter a name for this station", "error"); return; }
+  if (!_msPickedPrimary) return;
+  const result = await apiPost("station/join", { name, primary_url: _msPickedPrimary.url, primary_name: _msPickedPrimary.name });
+  if (!result.ok) { toast(`Could not connect: ${result.error}`, "error"); return; }
+  toast(`Connected to "${_msPickedPrimary.name}" as "${name}"`, "success");
+  _msStep("idle");
+  await loadStationInfo();
+  await loadSettings();
 }
 
 async function loadPrinters(current = "") {
@@ -1244,6 +1506,12 @@ function appendLogLine(message, level="info", ts=null, scroll=true) {
   if (scroll) { const log = document.getElementById("activity-log"); log.scrollTop = log.scrollHeight; }
 }
 
+function exportLogs() {
+  // Same-origin GET with a Content-Disposition attachment header — the
+  // browser just downloads it, no fetch/blob plumbing needed.
+  window.location.href = "/api/export_logs";
+}
+
 function toggleLog() {
   state.logVisible = !state.logVisible;
   const log = document.getElementById("activity-log");
@@ -1269,13 +1537,13 @@ function copyToClipboard(text) {
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────
-function toast(message, type="info") {
+function toast(message, type="info", duration=3200) {
   const el = document.createElement("div");
   el.className = `toast ${type}`;
   const icons = { success:"✓", error:"✗", info:"ℹ" };
   el.innerHTML = `<span>${icons[type]||"ℹ"}</span><span>${esc(message)}</span>`;
   document.getElementById("toast-container").appendChild(el);
-  setTimeout(() => { el.style.animation = "toastOut .2s ease forwards"; setTimeout(() => el.remove(), 200); }, 3200);
+  setTimeout(() => { el.style.animation = "toastOut .2s ease forwards"; setTimeout(() => el.remove(), 200); }, duration);
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -1801,7 +2069,18 @@ async function loadShippingOptionMappings(providerId) {
     return;
   }
 
-  wrap.innerHTML = options.map((opt, i) => {
+  const header = `
+    <div class="ship-option-header">
+      <div>PDX Shipping Option</div>
+      <div>Carrier</div>
+      <div>Service</div>
+      <div>Package</div>
+      <div>Confirmation</div>
+      <div>PDX Carrier</div>
+      <div></div>
+    </div>`;
+
+  wrap.innerHTML = header + options.map((opt, i) => {
     const m = byOption[opt.external_id] || {};
     const rowId = `${providerId}-${i}`;
     return `
@@ -1894,6 +2173,7 @@ async function toggleJobMode(gallery, currentMode) {
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
   restoreJobFilter();
+  try { await loadStationInfo(); } catch(e) { console.warn(e); }
   try { initSSE(); } catch(e) { console.warn(e); }
   try { await refreshAll(); } catch(e) { console.warn(e); }
   try { await updatePollerStatus(); } catch(e) { console.warn(e); }
@@ -1903,7 +2183,10 @@ async function init() {
   // Also check hot folder and show warning banner if missing
   try {
     const cfg = await apiGet("get_settings");
-    if (!cfg.lab_id || !cfg.api_key) {
+    // A secondary station is expected to have no PDX credentials of its own
+    // — it defers entirely to the primary — so don't override its forced
+    // "This Station" panel with the normal first-run nudge into Settings.
+    if ((!cfg.lab_id || !cfg.api_key) && state.stationInfo?.role !== "secondary") {
       showPanel("settings", document.querySelector(".nav-item[onclick*=\"'settings'\"]"));
     }
     updateHotFolderWarning(cfg.image_output_folder);

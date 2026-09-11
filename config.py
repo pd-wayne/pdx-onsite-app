@@ -27,7 +27,20 @@ DEFAULTS = {
     "samples_folder": "",
     "print_mode": "auto",           # "auto" | "manual"
     "destination_health_threshold": 10,  # minutes before a destination is flagged stale
+    "station_role": "solo",         # "solo" | "primary" | "secondary" — see discovery.py
+    "station_name": "",
+    "joined_primary_url": "",       # secondary only — last-known address of the primary it joined
 }
+
+
+def save_partial(patch: dict) -> bool:
+    """Merge `patch` onto the CURRENTLY SAVED config and write the result.
+    save() replaces anything missing from its argument with DEFAULTS, which
+    is safe only because the Settings page always submits every field at
+    once — anything touching just a couple of keys (the station-role
+    endpoints) must go through this instead, or it would silently reset
+    everything else (lab_id, api_key, printer_name, ...) back to defaults."""
+    return save({**load(), **patch})
 
 
 def load() -> dict:

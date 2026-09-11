@@ -413,6 +413,30 @@ class TestOrderActions:
         assert data["ok"] is False
         assert "error" in data
 
+    def test_confirm_order_tags_activity_log_with_station_name(self, client, monkeypatch):
+        import api as pdx_api
+        db.upsert_order({"num": "ORD001", "gallery": "Test Job",
+                         "shipping": {"option": {"externalId": "pdx_pickup"}, "destination": {}}})
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        client.post("/api/confirm_order", data=json.dumps({"order_num": "ORD001"}),
+                   content_type="application/json", headers={"X-Station-Name": "Check-in 2"})
+
+        log = client.get("/api/activity_log").get_json()
+        assert any("ORD001" in e["message"] and "Check-in 2" in e["message"] for e in log)
+
+    def test_confirm_order_without_station_header_has_no_tag(self, client, monkeypatch):
+        import api as pdx_api
+        db.upsert_order({"num": "ORD002", "gallery": "Test Job",
+                         "shipping": {"option": {"externalId": "pdx_pickup"}, "destination": {}}})
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        client.post("/api/confirm_order", data=json.dumps({"order_num": "ORD002"}), content_type="application/json")
+
+        log = client.get("/api/activity_log").get_json()
+        entry = next(e for e in log if "ORD002" in e["message"])
+        assert entry["message"] == "✅ Confirmed (scanned): ORD002"
+
     def test_fulfill_order_no_images(self, client):
         resp = client.post("/api/fulfill_order",
                            data=json.dumps({"order_num": "NOTEXIST"}),
@@ -699,10 +723,62 @@ class TestSystem:
         log = client.get("/api/activity_log").get_json()
         assert any(entry["message"] == "Test entry" for entry in log)
 
+    def test_export_logs_returns_zip_with_activity_log(self, client):
+        import io
+        import zipfile
+
+        client.post("/api/activity_log_write",
+                    data=json.dumps({"message": "Export me", "level": "info"}),
+                    content_type="application/json")
+        resp = client.get("/api/export_logs")
+        assert resp.status_code == 200
+        assert resp.content_type == "application/zip"
+        assert "attachment" in resp.headers.get("Content-Disposition", "")
+
+        zf = zipfile.ZipFile(io.BytesIO(resp.data))
+        assert set(zf.namelist()) == {"activity_log.txt", "pdx_onsite.log"}
+        assert "Export me" in zf.read("activity_log.txt").decode("utf-8")
+
+    def test_export_logs_activity_log_not_capped_at_50(self, client):
+        for i in range(60):
+            client.post("/api/activity_log_write",
+                        data=json.dumps({"message": f"Entry {i}", "level": "info"}),
+                        content_type="application/json")
+        import io
+        import zipfile
+        resp = client.get("/api/export_logs")
+        zf = zipfile.ZipFile(io.BytesIO(resp.data))
+        text = zf.read("activity_log.txt").decode("utf-8")
+        assert "Entry 0" in text  # the live panel's limit=50 would have dropped this
+
     def test_sse_endpoint_content_type(self, client):
         with client.get("/api/events") as resp:
             assert resp.status_code == 200
             assert "text/event-stream" in resp.content_type
+
+    def test_sse_broadcasts_to_every_connected_client(self, client):
+        """Regression test for the single-shared-Queue bug: with two stations
+        connected (same-location multi-station workflow), an event used to go
+        to whichever client's generator happened to dequeue it first, not
+        both. Each client must now get its own copy of every event."""
+        import server
+
+        with client.get("/api/events") as resp1, client.get("/api/events") as resp2:
+            iter1, iter2 = resp1.iter_encoded(), resp2.iter_encoded()
+            next(iter1)  # "connected" handshake
+            next(iter2)
+
+            server.push_event("broadcast_test", {"n": 1})
+
+            chunk1 = next(iter1)
+            chunk2 = next(iter2)
+            assert b"broadcast_test" in chunk1
+            assert b"broadcast_test" in chunk2
+
+    def test_get_lan_info(self, client):
+        data = client.get("/api/get_lan_info").get_json()
+        assert data["lan_url"].startswith("http://")
+        assert data["lan_url"].endswith(":5050")
 
     def test_samples_list_no_folder(self, client):
         data = client.get("/api/samples/list").get_json()
@@ -945,3 +1021,200 @@ class TestMarkReadyToShip:
         resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
         assert resp.get_json()["ok"] is True
         assert db.has_shipped_notification("ORD001") is True
+
+
+# ── Multi-station (same-location, onsite-only) ────────────────────────────────
+# discovery.discover_stations and requests.post (the inter-station handoff
+# call) are mocked throughout — real UDP broadcast isn't reliably available
+# in a sandboxed/CI environment (see tests/test_discovery.py, which covers
+# the real wire protocol over loopback instead). DiscoveryResponder.start/stop
+# are also mocked so tests never bind a real socket.
+
+class TestMultiStation:
+    @pytest.fixture(autouse=True)
+    def _no_real_network(self, monkeypatch):
+        import discovery
+        monkeypatch.setattr(discovery.DiscoveryResponder, "start", lambda self: None)
+        monkeypatch.setattr(discovery.DiscoveryResponder, "stop", lambda self: None)
+        monkeypatch.setattr(discovery, "discover_stations", lambda **kw: [])
+
+    def test_station_info_defaults_to_solo(self, client):
+        data = client.get("/api/station/info").get_json()
+        assert data["role"] == "solo"
+        assert data["name"] == ""
+        assert data["joined_primary_url"] == ""
+
+    def test_become_primary_requires_name(self, client):
+        resp = client.post("/api/station/become_primary", json={})
+        assert resp.get_json()["ok"] is False
+
+    def test_become_primary_sets_role(self, client):
+        resp = client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["other_primary_found"] is None
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "primary"
+        assert info["name"] == "Front Desk"
+
+    def test_become_primary_starts_poller_when_credentials_exist(self, client, app):
+        client.post("/api/save_settings", json={"lab_id": "LAB1", "api_key": "KEY1"})
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        # The MockPoller instance server.py is holding — reach it the same
+        # way other tests confirm poller state.
+        assert client.get("/api/get_poller_status").get_json()["running"] is True
+
+    def test_become_primary_preserves_other_settings(self, client):
+        """save_partial, not save() with a partial dict — a bare save()
+        would silently wipe lab_id/printer_name/etc. back to defaults."""
+        client.post("/api/save_settings", json={"lab_id": "LAB1", "api_key": "KEY1", "studio_name": "My Studio"})
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        cfg = client.get("/api/get_settings").get_json()
+        assert cfg["lab_id"] == "LAB1"
+        assert cfg["studio_name"] == "My Studio"
+
+    def test_become_primary_no_warning_when_nothing_else_found(self, client):
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        log = client.get("/api/activity_log").get_json()
+        assert not any("Another primary" in e["message"] for e in log)
+
+    def test_become_primary_handoff_succeeds_when_another_primary_reachable(self, client, monkeypatch):
+        import discovery
+        import requests
+
+        monkeypatch.setattr(discovery, "discover_stations",
+                            lambda **kw: [{"name": "Old Primary", "url": "http://10.0.0.5:5050", "studio_name": ""}])
+        calls = []
+
+        class FakeResp:
+            def json(self_inner):
+                return {"ok": True}
+
+        def fake_post(url, json=None, timeout=None):
+            calls.append((url, json))
+            return FakeResp()
+
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        resp = client.post("/api/station/become_primary", json={"name": "Check-in 2"})
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["other_primary_found"] is None  # handoff succeeded, so no conflict remains
+
+        assert len(calls) == 1
+        url, payload = calls[0]
+        assert url == "http://10.0.0.5:5050/api/station/step_down"
+        assert payload["new_primary_name"] == "Check-in 2"
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "primary"
+
+    def test_become_primary_falls_back_to_soft_warning_when_handoff_unreachable(self, client, monkeypatch):
+        import discovery
+        import requests
+
+        monkeypatch.setattr(discovery, "discover_stations",
+                            lambda **kw: [{"name": "Old Primary", "url": "http://10.0.0.5:5050", "studio_name": ""}])
+
+        def fake_post(*a, **k):
+            raise ConnectionError("unreachable")
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        resp = client.post("/api/station/become_primary", json={"name": "Check-in 2"})
+        data = resp.get_json()
+        assert data["ok"] is True  # emergency promotion still proceeds
+        assert data["other_primary_found"]["name"] == "Old Primary"
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "primary"  # promotion happened despite the conflict
+
+        log = client.get("/api/activity_log").get_json()
+        assert any("Old Primary" in e["message"] and e["level"] == "error" for e in log)
+
+    def test_become_primary_returns_error_when_handoff_explicitly_refused(self, client, monkeypatch):
+        import discovery
+        import requests
+
+        monkeypatch.setattr(discovery, "discover_stations",
+                            lambda **kw: [{"name": "Old Primary", "url": "http://10.0.0.5:5050", "studio_name": ""}])
+
+        class FakeResp:
+            def json(self_inner):
+                return {"ok": False, "error": "This station is not currently the primary"}
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp())
+
+        resp = client.post("/api/station/become_primary", json={"name": "Check-in 2"})
+        data = resp.get_json()
+        assert data["ok"] is False
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "solo"  # never promoted — the refusal must block it
+
+    def test_station_join_requires_name_and_primary_url(self, client):
+        resp = client.post("/api/station/join", json={"name": "Check-in 2"})
+        assert resp.get_json()["ok"] is False
+
+    def test_station_join_sets_secondary_role(self, client):
+        resp = client.post("/api/station/join",
+                           json={"name": "Check-in 2", "primary_url": "http://10.0.0.5:5050", "primary_name": "Front Desk"})
+        assert resp.get_json()["ok"] is True
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "secondary"
+        assert info["name"] == "Check-in 2"
+        assert info["joined_primary_url"] == "http://10.0.0.5:5050"
+
+    def test_step_down_requires_currently_being_primary(self, client):
+        resp = client.post("/api/station/step_down",
+                           json={"new_primary_url": "http://x:5050", "new_primary_name": "X"})
+        assert resp.get_json()["ok"] is False
+
+    def test_step_down_demotes_and_pushes_redirect_event(self, client):
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+
+        with client.get("/api/events") as resp:
+            it = resp.iter_encoded()
+            next(it)  # "connected" handshake
+
+            step_down = client.post("/api/station/step_down",
+                                    json={"new_primary_url": "http://10.0.0.9:5050", "new_primary_name": "New Primary"})
+            assert step_down.get_json()["ok"] is True
+
+            # step_down logs an activity line (pushed first) THEN the
+            # station_demoted redirect event — read both, don't assume order.
+            combined = next(it) + next(it)
+            assert b"station_demoted" in combined
+            assert b"10.0.0.9" in combined
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "secondary"
+        assert info["joined_primary_url"] == "http://10.0.0.9:5050"
+        assert info["name"] == "Front Desk"  # this station's own name survives the demotion
+
+    def test_reset_to_solo_clears_role_and_stops_poller(self, client):
+        client.post("/api/save_settings", json={"lab_id": "LAB1", "api_key": "KEY1"})
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        assert client.get("/api/get_poller_status").get_json()["running"] is True
+
+        resp = client.post("/api/station/reset_to_solo")
+        assert resp.get_json()["ok"] is True
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "solo"
+        assert info["name"] == ""
+        assert info["joined_primary_url"] == ""
+        assert client.get("/api/get_poller_status").get_json()["running"] is False
+
+    def test_discover_endpoint_excludes_self(self, client, monkeypatch):
+        import discovery
+        import server as server_module
+        my_url = f"http://{server_module.get_lan_ip()}:5050"
+        monkeypatch.setattr(discovery, "discover_stations",
+                            lambda **kw: [{"name": "Me", "url": my_url, "studio_name": ""},
+                                         {"name": "Someone Else", "url": "http://10.0.0.5:5050", "studio_name": ""}])
+        data = client.get("/api/station/discover").get_json()
+        names = [s["name"] for s in data["stations"]]
+        assert "Me" not in names
+        assert "Someone Else" in names

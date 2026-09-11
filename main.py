@@ -29,7 +29,7 @@ import db
 import config
 import poller as poller_module
 import updater
-from server import create_app
+from server import create_app, get_lan_ip
 
 PORT = 5050
 
@@ -83,7 +83,12 @@ def main():
     ui_path = get_ui_path()
     app = create_app(poller=p, ui_path=ui_path)
 
-    if cfg.get("lab_id") and cfg.get("api_key"):
+    # A secondary station never polls or processes on its own — it's a
+    # labeled window into whichever station is currently primary. Solo (the
+    # default, single-station case) and primary both poll normally.
+    if cfg.get("station_role") == "secondary":
+        log.info(f"Station role=secondary, joined={cfg.get('joined_primary_url', '(none)')} — poller not started")
+    elif cfg.get("lab_id") and cfg.get("api_key"):
         p.start()
         log.info("Poller started")
         threading.Thread(
@@ -97,9 +102,17 @@ def main():
     threading.Thread(target=_check_updates, daemon=True).start()
     threading.Thread(target=open_browser, daemon=True).start()
 
-    log.info(f"Starting Flask on http://localhost:{PORT}")
+    log.info(f"Starting Flask on http://localhost:{PORT} (LAN: http://{get_lan_ip()}:{PORT})")
     try:
-        app.run(host="127.0.0.1", port=PORT, debug=False, use_reloader=False)
+        # 0.0.0.0, not 127.0.0.1: lets a second station on the same event
+        # WiFi/LAN open a browser straight to this machine and share the same
+        # backend (db, poller, printer) instead of running its own separate
+        # instance — see the "same-location multi-station" workflow.
+        # threaded=True is required for that to actually work: each connected
+        # browser holds one long-lived /api/events SSE connection open
+        # indefinitely, which would otherwise block every other request
+        # (from either station) behind it.
+        app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False, threaded=True)
     finally:
         p.stop()
         log.info("=== PDX Onsite shutting down ===")

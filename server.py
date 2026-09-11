@@ -1,27 +1,39 @@
 """
 server.py — Flask app for PDX Onsite
 """
+import io
 import json
 import logging
 import mimetypes
 import os
 import queue
+import socket
+import sys
 import threading
 import tkinter as tk
+import zipfile
 from datetime import datetime
 from tkinter import filedialog
 from typing import Optional
 
+import requests
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory, send_file
 
 import api as pdx_api
 import config
 import db
+import discovery
 import printer
 import shipping_providers
 
 log = logging.getLogger("pdx.server")
-_event_queue: queue.Queue = queue.Queue(maxsize=200)
+# One queue per connected browser (not a single shared queue) — with two
+# stations sharing this backend over LAN (see get_lan_ip below), each needs
+# its own copy of every event. A shared queue would round-robin events
+# across clients instead of broadcasting, so one station would silently miss
+# updates the other happened to dequeue first.
+_sse_clients: list = []
+_sse_clients_lock = threading.Lock()
 SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"}
 MAX_LOGO_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 _pending_update: Optional[dict] = None
@@ -32,18 +44,49 @@ def set_pending_update(info: dict):
     _pending_update = info
 
 
+def get_lan_ip() -> str:
+    """Best-effort LAN address for this machine, shown to staff so a second
+    station can point a browser at it. Doesn't actually send any traffic —
+    opening a UDP socket to a public IP just makes the OS pick the outbound
+    interface, which is all we need the address of."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 def push_event(event: str, data: dict):
     try:
         payload = json.dumps({"event": event, "data": data})
-        _event_queue.put_nowait(f"data: {payload}\n\n")
-    except queue.Full:
-        pass
+        msg = f"data: {payload}\n\n"
+    except Exception:
+        return
+    with _sse_clients_lock:
+        clients = list(_sse_clients)
+    for client_queue in clients:
+        try:
+            client_queue.put_nowait(msg)
+        except queue.Full:
+            pass
 
 
 def _log(msg: str, level: str = "info"):
     db.log_activity(msg, level)
     push_event("activity", {"message": msg, "level": level})
     getattr(log, level, log.info)(msg)
+
+
+def _station_tag() -> str:
+    """A secondary station tags its requests with X-Station-Name (see
+    app.js apiPost) so the Activity Log can show which physical station did
+    what — the whole reason this exists is being able to answer exactly
+    that question after an event."""
+    name = request.headers.get("X-Station-Name", "").strip()
+    return f" ({name})" if name else ""
 
 
 def create_app(poller, ui_path: str = "") -> Flask:
@@ -53,6 +96,29 @@ def create_app(poller, ui_path: str = "") -> Flask:
     cfg = config.load()
     if cfg.get("image_output_folder"):
         db.seed_default_destination(cfg["image_output_folder"])
+
+    # ── Multi-station (same-location, onsite-only workflow) ─────────────────
+    discovery_responder = discovery.DiscoveryResponder(get_info=lambda: {
+        "name": config.load().get("station_name", ""),
+        "url": f"http://{get_lan_ip()}:5050",
+        "studio_name": config.load().get("studio_name", ""),
+    })
+    if cfg.get("station_role") == "primary":
+        discovery_responder.start()
+
+    def _start_as_primary(name: str):
+        config.save_partial({"station_role": "primary", "station_name": name, "joined_primary_url": ""})
+        c = config.load()
+        if c.get("lab_id") and c.get("api_key"):
+            poller.configure(c["lab_id"], c["api_key"], int(c.get("poll_interval", 60)))
+            if not poller.running:
+                poller.start()
+        discovery_responder.start()
+
+    def _stop_being_primary():
+        if poller.running:
+            poller.stop()
+        discovery_responder.stop()
 
     poller.on_new_orders    = lambda count:      (push_event("new_orders", {"count": count}), _log(f"📦 {count} new order(s) received"))
     poller.on_poll_complete = lambda ts:         push_event("poll_complete", {"timestamp": ts})
@@ -76,16 +142,138 @@ def create_app(poller, ui_path: str = "") -> Flask:
 
     @app.route("/api/events")
     def sse_stream():
+        client_queue: queue.Queue = queue.Queue(maxsize=200)
+        with _sse_clients_lock:
+            _sse_clients.append(client_queue)
+
         def generate():
-            yield "data: {\"event\":\"connected\"}\n\n"
-            while True:
-                try:
-                    msg = _event_queue.get(timeout=15)
-                    yield msg
-                except queue.Empty:
-                    yield ": heartbeat\n\n"
+            try:
+                yield "data: {\"event\":\"connected\"}\n\n"
+                while True:
+                    try:
+                        msg = client_queue.get(timeout=15)
+                        yield msg
+                    except queue.Empty:
+                        yield ": heartbeat\n\n"
+            finally:
+                # Runs when the browser tab closes / navigates away and the
+                # generator is torn down — keeps _sse_clients from growing
+                # forever as stations connect and disconnect over a long event.
+                with _sse_clients_lock:
+                    if client_queue in _sse_clients:
+                        _sse_clients.remove(client_queue)
         return Response(generate(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.route("/api/get_lan_info")
+    def get_lan_info():
+        """So non-technical staff can read the address off screen instead of
+        needing to run ipconfig — see the "same-location multi-station"
+        workflow: one station runs the real backend, others just point a
+        browser at this URL."""
+        return jsonify({"lan_url": f"http://{get_lan_ip()}:5050"})
+
+    @app.route("/api/station/info")
+    def station_info():
+        c = config.load()
+        return jsonify({
+            "role": c.get("station_role", "solo"),
+            "name": c.get("station_name", ""),
+            "joined_primary_url": c.get("joined_primary_url", ""),
+            "lan_url": f"http://{get_lan_ip()}:5050",
+            "studio_name": c.get("studio_name", ""),
+        })
+
+    @app.route("/api/station/discover")
+    def station_discover():
+        my_url = f"http://{get_lan_ip()}:5050"
+        stations = [s for s in discovery.discover_stations() if s["url"] != my_url]
+        return jsonify({"stations": stations})
+
+    @app.route("/api/station/become_primary", methods=["POST"])
+    def become_primary():
+        """The one action that covers three cases: a fresh station going
+        primary for the first time, an emergency promotion because the real
+        primary is unreachable, and gracefully reclaiming the role from a
+        primary that's actually still healthy (including the original
+        primary coming back and taking its role back). Whenever another
+        primary answers on the network, a coordinated handoff is attempted
+        first so there's never a window where two stations both believe
+        they're primary — only if that station is genuinely unreachable does
+        this fall back to the soft-warned emergency path."""
+        data = request.get_json() or {}
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"ok": False, "error": "Station name is required"})
+
+        my_url = f"http://{get_lan_ip()}:5050"
+        others = [s for s in discovery.discover_stations() if s.get("name") and s["url"] != my_url]
+
+        if others:
+            target = others[0]
+            try:
+                resp = requests.post(f"{target['url']}/api/station/step_down",
+                                     json={"new_primary_url": my_url, "new_primary_name": name}, timeout=4)
+                result = resp.json()
+                if not result.get("ok"):
+                    return jsonify({"ok": False, "error": result.get("error", "The current primary refused to step down")})
+                others = []  # confirmed clear — it just stood down for us
+            except Exception:
+                # Unreachable despite just answering the discovery broadcast
+                # (a tight race) — proceed like the emergency-promotion path,
+                # with the same soft warning below.
+                pass
+
+        _start_as_primary(name)
+        _log(f"🔷 This station is now the main station: \"{name}\"")
+
+        if others:
+            names = ", ".join(f'"{o["name"]}"' for o in others)
+            _log(f"⚠ Another primary station ({names}) was already active on this network "
+                 f"when \"{name}\" was set up as primary — this can cause duplicate prints.", "error")
+            return jsonify({"ok": True, "other_primary_found": others[0]})
+        return jsonify({"ok": True, "other_primary_found": None})
+
+    @app.route("/api/station/join", methods=["POST"])
+    def station_join():
+        data = request.get_json() or {}
+        name = (data.get("name") or "").strip()
+        primary_url = (data.get("primary_url") or "").strip()
+        primary_name = (data.get("primary_name") or "").strip()
+        if not name or not primary_url:
+            return jsonify({"ok": False, "error": "Station name and a station to join are required"})
+        _stop_being_primary()
+        config.save_partial({"station_role": "secondary", "station_name": name, "joined_primary_url": primary_url})
+        _log(f"🔗 This station joined \"{primary_name or primary_url}\" as \"{name}\"")
+        return jsonify({"ok": True})
+
+    @app.route("/api/station/step_down", methods=["POST"])
+    def station_step_down():
+        """Called BY another station reclaiming the primary role — not
+        something a person clicks directly. Stops acting as primary
+        immediately and tells any locally-connected browser to redirect."""
+        data = request.get_json() or {}
+        new_primary_url = (data.get("new_primary_url") or "").strip()
+        new_primary_name = (data.get("new_primary_name") or "").strip()
+        c = config.load()
+        if c.get("station_role") != "primary":
+            return jsonify({"ok": False, "error": "This station is not currently the primary"})
+        if not new_primary_url:
+            return jsonify({"ok": False, "error": "new_primary_url is required"})
+
+        my_name = c.get("station_name", "")
+        _stop_being_primary()
+        config.save_partial({"station_role": "secondary", "station_name": my_name, "joined_primary_url": new_primary_url})
+        _log(f"⬇ Stepped down as main station — \"{new_primary_name or new_primary_url}\" is now primary")
+        push_event("station_demoted", {"redirect_url": f"{new_primary_url}?station={my_name}"})
+        return jsonify({"ok": True})
+
+    @app.route("/api/station/reset_to_solo", methods=["POST"])
+    def station_reset_to_solo():
+        _stop_being_primary()
+        config.save_partial({"station_role": "solo", "station_name": "", "joined_primary_url": ""})
+        _log("Station reset to standalone (solo) mode")
+        return jsonify({"ok": True})
 
     # ── Settings ──────────────────────────────────────────────────────────────
 
@@ -571,7 +759,7 @@ def create_app(poller, ui_path: str = "") -> Flask:
             _log(f"Confirm failed for {order_num}: {err}", "error")
             return jsonify({"ok": False, "error": err})
         db.confirm_order(order_num)
-        _log(f"✅ Confirmed (scanned): {order_num}")
+        _log(f"✅ Confirmed (scanned): {order_num}{_station_tag()}")
         push_event("order_confirmed", {"order_num": order_num})
         return jsonify({"ok": True})
 
@@ -849,6 +1037,29 @@ def create_app(poller, ui_path: str = "") -> Flask:
     def activity_log():
         limit = int(request.args.get("limit", 50))
         return jsonify(db.get_activity_log(limit))
+
+    @app.route("/api/export_logs")
+    def export_logs():
+        """One-click bundle for non-technical staff to send us after an
+        incident: the full curated Activity Log (readable, unbounded — the
+        live panel only ever shows the last 50) plus the raw technical
+        pdx_onsite.log, zipped together. Nothing to hunt for on disk."""
+        app_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+            else os.path.dirname(os.path.abspath(__file__))
+        raw_log_path = os.path.join(app_dir, "pdx_onsite.log")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            lines = [f"{e['ts']}  [{e['level'].upper()}]  {e['message']}" for e in db.get_activity_log_all()]
+            zf.writestr("activity_log.txt", "\n".join(lines) if lines else "(empty)")
+            if os.path.exists(raw_log_path):
+                zf.write(raw_log_path, "pdx_onsite.log")
+            else:
+                zf.writestr("pdx_onsite.log", "(not found on this machine)")
+        buf.seek(0)
+        return send_file(buf, mimetype="application/zip", as_attachment=True,
+                         download_name=f"pdx_onsite_logs_{stamp}.zip")
 
     @app.route("/api/activity_log_write", methods=["POST"])
     def activity_log_write():
