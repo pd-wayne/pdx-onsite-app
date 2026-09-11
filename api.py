@@ -6,7 +6,7 @@ import logging
 
 log = logging.getLogger("pdx.api")
 PRODUCTION_URL = "https://api.photoday.io"
-STAGING_URL = "http://api-staging.photoday.io"
+STAGING_URL = "https://api-staging.photoday.io"
 
 
 def get_base_url(environment: str = None) -> str:
