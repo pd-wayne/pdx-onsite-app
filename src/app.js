@@ -1105,9 +1105,18 @@ async function loadSettings() {
   } catch(e) { console.warn("[Settings] routing load:", e); }
   try {
     const cfg = await apiGet("get_settings");
-    document.getElementById("s-api-environment").value = cfg.api_environment || "production";
-    document.getElementById("s-lab-id").value = cfg.lab_id || "";
-    document.getElementById("s-api-key").value = cfg.api_key || "";
+    // Each environment keeps its own saved Lab ID/API Key — cache both so
+    // switching the dropdown (onApiEnvironmentChange) can swap the visible
+    // fields without losing whichever one isn't currently shown.
+    state.envCredentials = {
+      production: { lab_id: cfg.production_lab_id || "", api_key: cfg.production_api_key || "" },
+      staging:    { lab_id: cfg.staging_lab_id || "",    api_key: cfg.staging_api_key || "" },
+    };
+    const activeEnv = cfg.api_environment || "production";
+    state._lastShownEnv = activeEnv;
+    document.getElementById("s-api-environment").value = activeEnv;
+    document.getElementById("s-lab-id").value = state.envCredentials[activeEnv].lab_id;
+    document.getElementById("s-api-key").value = state.envCredentials[activeEnv].api_key;
     document.getElementById("s-studio-name").value = cfg.studio_name || "";
     document.getElementById("s-print-mode").value = cfg.print_mode || "auto";
     document.getElementById("s-poll-interval").value = String(cfg.poll_interval || 60);
@@ -1364,13 +1373,40 @@ async function loadPrinters(current = "") {
   document.getElementById("printer-manual-row").style.display = "none";
 }
 
+// Switching environments swaps which saved Lab ID/API Key are shown — it
+// does NOT save anything by itself, matching every other Settings field
+// (nothing takes effect until Save Settings is clicked).
+function onApiEnvironmentChange() {
+  const prevEnv = state._lastShownEnv || "production";
+  state.envCredentials[prevEnv] = {
+    lab_id:  document.getElementById("s-lab-id").value.trim(),
+    api_key: document.getElementById("s-api-key").value.trim(),
+  };
+  const newEnv = document.getElementById("s-api-environment").value;
+  const creds = state.envCredentials[newEnv] || { lab_id: "", api_key: "" };
+  document.getElementById("s-lab-id").value = creds.lab_id;
+  document.getElementById("s-api-key").value = creds.api_key;
+  state._lastShownEnv = newEnv;
+}
+
 async function saveSettings() {
   const printerSel    = document.getElementById("s-printer-name").value;
   const printerManual = document.getElementById("s-printer-manual")?.value.trim() || "";
+  const activeEnv = document.getElementById("s-api-environment").value;
+  const activeLabId  = document.getElementById("s-lab-id").value.trim();
+  const activeApiKey = document.getElementById("s-api-key").value.trim();
+  // Keep the in-memory cache current for whichever environment is showing,
+  // then persist BOTH environments' credentials — lab_id/api_key (used
+  // everywhere else in the app unchanged) always mirror the active one.
+  state.envCredentials[activeEnv] = { lab_id: activeLabId, api_key: activeApiKey };
   const cfg = {
-    api_environment:      document.getElementById("s-api-environment").value,
-    lab_id:               document.getElementById("s-lab-id").value.trim(),
-    api_key:              document.getElementById("s-api-key").value.trim(),
+    api_environment:      activeEnv,
+    lab_id:               activeLabId,
+    api_key:              activeApiKey,
+    production_lab_id:    state.envCredentials.production.lab_id,
+    production_api_key:   state.envCredentials.production.api_key,
+    staging_lab_id:       state.envCredentials.staging.lab_id,
+    staging_api_key:      state.envCredentials.staging.api_key,
     studio_name:          document.getElementById("s-studio-name").value.trim(),
     poll_interval:        parseInt(document.getElementById("s-poll-interval").value),
     unclaimed_threshold:  parseInt(document.getElementById("s-unclaimed-threshold").value),
