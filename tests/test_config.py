@@ -89,3 +89,55 @@ class TestConfigSave:
         config.save({"lab_id": "x", "custom_key": "custom_value"})
         loaded = config.load()
         assert loaded["custom_key"] == "custom_value"
+
+
+class TestPerEnvironmentCredentials:
+    """Production and staging each keep their own saved Lab ID/API Key.
+    lab_id/api_key (used everywhere else — poller, job-seeding, etc.) always
+    mirror whichever environment is currently active."""
+
+    def test_legacy_lab_id_migrates_to_production_on_load(self, tmp_path, monkeypatch):
+        """A studio that saved credentials before this feature existed had
+        an implicitly-production lab_id/api_key — load() must not make it
+        look like they lost their Lab ID the first time Settings opens."""
+        cfg_path = str(tmp_path / "cfg.json")
+        monkeypatch.setattr(config, "CONFIG_PATH", cfg_path)
+        with open(cfg_path, "w") as f:
+            json.dump({"lab_id": "OLD_LAB", "api_key": "OLD_KEY"}, f)
+
+        cfg = config.load()
+        assert cfg["production_lab_id"] == "OLD_LAB"
+        assert cfg["production_api_key"] == "OLD_KEY"
+
+    def test_migration_does_not_override_an_already_saved_production_lab_id(self, tmp_path, monkeypatch):
+        cfg_path = str(tmp_path / "cfg.json")
+        monkeypatch.setattr(config, "CONFIG_PATH", cfg_path)
+        with open(cfg_path, "w") as f:
+            json.dump({"lab_id": "CURRENT", "production_lab_id": "ALREADY_SET"}, f)
+
+        cfg = config.load()
+        assert cfg["production_lab_id"] == "ALREADY_SET"
+
+    def test_saving_staging_credentials_does_not_overwrite_production(self, tmp_path, monkeypatch):
+        """The actual bug this fixes: before per-environment storage, saving
+        staging's Lab ID overwrote production's in the same lab_id field."""
+        monkeypatch.setattr(config, "CONFIG_PATH", str(tmp_path / "cfg.json"))
+        config.save({
+            "api_environment": "production",
+            "lab_id": "PROD_LAB", "api_key": "PROD_KEY",
+            "production_lab_id": "PROD_LAB", "production_api_key": "PROD_KEY",
+            "staging_lab_id": "", "staging_api_key": "",
+        })
+        config.save({
+            "api_environment": "staging",
+            "lab_id": "STAGE_LAB", "api_key": "STAGE_KEY",
+            "production_lab_id": "PROD_LAB", "production_api_key": "PROD_KEY",
+            "staging_lab_id": "STAGE_LAB", "staging_api_key": "STAGE_KEY",
+        })
+
+        cfg = config.load()
+        assert cfg["production_lab_id"] == "PROD_LAB"
+        assert cfg["production_api_key"] == "PROD_KEY"
+        assert cfg["staging_lab_id"] == "STAGE_LAB"
+        assert cfg["staging_api_key"] == "STAGE_KEY"
+        assert cfg["lab_id"] == "STAGE_LAB"  # active credentials match the active environment
