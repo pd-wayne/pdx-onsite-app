@@ -1,5 +1,5 @@
 {
-  "version": "2.2.2",
+  "version": "2.2.3",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.2.2 — Clearer Destinations save state, product descriptions shown first in routing"
+  "release_notes": "v2.2.3 — Staging connection errors now show the real reason instead of a generic message"
 }
