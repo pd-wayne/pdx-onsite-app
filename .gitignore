@@ -1,0 +1,17 @@
+# Runtime data — created fresh by the app on first run, never source
+pdx_onsite.db
+pdx_onsite.log
+pdx_onsite_config.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# PyInstaller build output
+build/
+dist/
+*.spec
+
+# OS / editor cruft
+.DS_Store
