@@ -118,8 +118,10 @@ def create_app(poller, ui_path: str) -> Flask:
     @app.route("/api/test_connection", methods=["POST"])
     def test_connection():
         data = request.get_json()
+        env = data.get("api_environment") or "production"
         ok, msg = pdx_api.test_connection(data.get("lab_id", ""), data.get("api_key", ""),
-                                          environment=data.get("api_environment"))
+                                          environment=env)
+        _log(f"Test connection ({env}): {'✓' if ok else '✗'} {msg}", "info" if ok else "warning")
         return jsonify({"ok": ok, "message": msg})
 
     @app.route("/api/get_printers")

@@ -34,8 +34,11 @@ def _get_orders(lab_id: str, api_key: str, status: str, limit: int = 50, page: i
                 return data.get("orders", data.get("data", [])), ""
             return [], ""
         return [], f"HTTP {resp.status_code}: {resp.text[:200]}"
-    except requests.exceptions.ConnectionError:
-        return [], "Connection error"
+    except requests.exceptions.ConnectionError as e:
+        # Include the underlying reason (DNS failure, refused, SSL error, etc.)
+        # — the bare "Connection error" string this used to return gave no way
+        # to tell those apart from the exported logs.
+        return [], f"Connection error: {e}"
     except requests.exceptions.Timeout:
         return [], "Request timed out"
     except Exception as e:
@@ -47,7 +50,9 @@ def poll_orders(lab_id: str, api_key: str, environment: str = None) -> tuple[lis
     if not lab_id or not api_key:
         return [], "Lab ID and API key are required"
     orders, err = _get_orders(lab_id, api_key, "received", limit=50, environment=environment)
-    if not err:
+    if err:
+        log.warning(f"[Poll] Error: {err}")
+    else:
         log.info(f"[Poll] Fetched {len(orders)} received orders")
     return orders, err
 
