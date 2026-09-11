@@ -5,11 +5,23 @@ import requests
 import logging
 
 log = logging.getLogger("pdx.api")
-BASE_URL = "https://api.photoday.io"
+PRODUCTION_URL = "https://api.photoday.io"
+STAGING_URL = "http://api-staging.photoday.io"
 
 
-def _get_orders(lab_id: str, api_key: str, status: str, limit: int = 50, page: int = 1) -> tuple[list, str]:
-    url = f"{BASE_URL}/pdx/{lab_id}/integrations/orders"
+def get_base_url(environment: str = None) -> str:
+    """Which PDX API this app talks to — Settings lets staff switch between
+    production and staging (e.g. for a demo against staging data). Pass
+    `environment` explicitly to test a not-yet-saved choice (Test Connection);
+    omit it to use whatever's currently saved (normal polling)."""
+    if environment is None:
+        import config
+        environment = config.load().get("api_environment")
+    return STAGING_URL if environment == "staging" else PRODUCTION_URL
+
+
+def _get_orders(lab_id: str, api_key: str, status: str, limit: int = 50, page: int = 1, environment: str = None) -> tuple[list, str]:
+    url = f"{get_base_url(environment)}/pdx/{lab_id}/integrations/orders"
     params = {"status": status, "limit": limit, "page": page}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
@@ -30,11 +42,11 @@ def _get_orders(lab_id: str, api_key: str, status: str, limit: int = 50, page: i
         return [], str(e)
 
 
-def poll_orders(lab_id: str, api_key: str) -> tuple[list, str]:
+def poll_orders(lab_id: str, api_key: str, environment: str = None) -> tuple[list, str]:
     """Fetch received orders for live polling."""
     if not lab_id or not api_key:
         return [], "Lab ID and API key are required"
-    orders, err = _get_orders(lab_id, api_key, "received", limit=50)
+    orders, err = _get_orders(lab_id, api_key, "received", limit=50, environment=environment)
     if not err:
         log.info(f"[Poll] Fetched {len(orders)} received orders")
     return orders, err
@@ -105,7 +117,7 @@ def shipped_callback(lab_id: str, api_key: str, order_num: str,
     tracking number from the studio's shipping process)."""
     if not lab_id or not api_key:
         return False, "Lab ID and API key are required"
-    url = f"{BASE_URL}/pdx/{lab_id}/integrations/orders/{order_num}/shipped"
+    url = f"{get_base_url()}/pdx/{lab_id}/integrations/orders/{order_num}/shipped"
     payload = {"carrier": carrier, "trackingNumber": tracking_number}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
@@ -124,8 +136,8 @@ def shipped_callback(lab_id: str, api_key: str, order_num: str,
         return False, str(e)
 
 
-def test_connection(lab_id: str, api_key: str) -> tuple[bool, str]:
-    orders, err = poll_orders(lab_id, api_key)
+def test_connection(lab_id: str, api_key: str, environment: str = None) -> tuple[bool, str]:
+    orders, err = poll_orders(lab_id, api_key, environment=environment)
     if err:
         return False, err
     return True, f"Connected — {len(orders)} pending order(s) found"

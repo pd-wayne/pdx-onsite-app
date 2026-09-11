@@ -27,6 +27,7 @@ DEFAULTS = {
     "samples_folder": "",
     "print_mode": "auto",           # "auto" | "manual"
     "destination_health_threshold": 10,  # minutes before a destination is flagged stale
+    "api_environment": "production",  # "production" | "staging" — see api.py get_base_url()
 }
 
 

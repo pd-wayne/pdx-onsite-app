@@ -151,6 +151,14 @@
         </div>
         <div class="settings-section">
           <div class="settings-section-title">PDX Credentials</div>
+          <div class="form-row">
+            <label class="form-label">Environment</label>
+            <select class="form-select" id="s-api-environment" style="width:auto">
+              <option value="production">Production</option>
+              <option value="staging">Staging</option>
+            </select>
+            <div class="form-hint">Which PDX API this app talks to. Switch to Staging for a demo against staging data — remember to switch back.</div>
+          </div>
           <div class="form-row"><label class="form-label">Lab ID</label><input class="form-input mono" id="s-lab-id" type="text" autocomplete="off" spellcheck="false"></div>
           <div class="form-row"><label class="form-label">API Key</label><input class="form-input mono" id="s-api-key" type="password" autocomplete="off"></div>
           <div style="display:flex;gap:8px;margin-top:4px">
