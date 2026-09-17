@@ -868,3 +868,11 @@ class TestOrderShipProviderLinkage:
         order = db.get_order("ORD002")
         assert order["ship_provider_id"] is None
         assert order["ship_external_order_id"] is None
+
+    def test_save_and_read_back_ship_label(self, fresh_db):
+        db.upsert_order({"num": "ORD003", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"}, "destination": {"recipient": "C"}}})
+        assert db.get_order("ORD003")["ship_label_data"] is None
+        db.save_order_ship_label("ORD003", "base64pdfbytes==")
+        assert db.get_order("ORD003")["ship_label_data"] == "base64pdfbytes=="

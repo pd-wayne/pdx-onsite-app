@@ -408,11 +408,13 @@
     <div id="detail-ready-to-ship-form" style="display:none">
       <label class="form-label" for="ready-to-ship-weight">Package Weight (lb)</label>
       <input class="form-input" id="ready-to-ship-weight" type="number" step="0.1" min="0.1" style="width:100%;margin-bottom:8px;box-sizing:border-box">
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;margin-bottom:8px">
         <button class="btn-action btn-confirm" style="flex:1;margin:0" onclick="detailReadyToShip()">🚀 Buy Label</button>
         <button class="btn-action btn-reprint-img" style="flex:1;margin:0" onclick="hideReadyToShipForm()">Cancel</button>
       </div>
+      <button class="btn-action btn-reprint-img" id="btn-ready-to-ship-test" style="margin:0;width:100%" onclick="detailTestLabel()">🧪 Test Label (void, not reported to PDX)</button>
     </div>
+    <button class="btn-action btn-fulfill" id="btn-detail-print-label" onclick="detailPrintLabel()" style="display:none">🖨 Print Label</button>
     <button class="btn-action btn-fulfill" id="btn-detail-mark-shipped" onclick="showShipForm()" style="display:none">📦 Mark Shipped</button>
     <div id="detail-ship-form" style="display:none">
       <select class="form-select" id="ship-carrier" style="width:100%;margin-bottom:6px">

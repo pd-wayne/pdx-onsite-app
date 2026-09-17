@@ -168,6 +168,7 @@ def init_db():
             ("is_bulk",         "INTEGER NOT NULL DEFAULT 0"),
             ("ship_provider_id",      "INTEGER"),
             ("ship_external_order_id", "TEXT"),
+            ("ship_label_data",       "TEXT"),
         ])
         _migrate_columns(conn, "jobs", [
             ("fulfillment_mode", "TEXT NOT NULL DEFAULT 'onsite'"),
@@ -1049,6 +1050,19 @@ def set_order_ship_provider(order_num: str, provider_id: int, external_order_id:
         conn.execute(
             "UPDATE orders SET ship_provider_id = ?, ship_external_order_id = ? WHERE order_num = ?",
             (provider_id, external_order_id, order_num)
+        )
+        conn.commit()
+
+
+def save_order_ship_label(order_num: str, label_data: str):
+    """Persists the real carrier shipping label (base64 PDF from the provider's
+    create_label response) so staff can reprint it later without buying a new
+    one — separate from the in-studio packing slip, which is a different PDF
+    the app renders itself."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE orders SET ship_label_data = ? WHERE order_num = ?",
+            (label_data, order_num)
         )
         conn.commit()
 

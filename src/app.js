@@ -516,6 +516,7 @@ async function openDetail(orderNum) {
   const btnMarkSlip = document.getElementById("btn-detail-mark-slip");
   const btnMarkShipped = document.getElementById("btn-detail-mark-shipped");
   const btnReadyToShip = document.getElementById("btn-detail-ready-to-ship");
+  const btnPrintLabel = document.getElementById("btn-detail-print-label");
 
   btnFulfill.disabled = isFulfilled || isConfirmed;
   btnFulfill.textContent = (isFulfilled || isConfirmed) ? "🖨 Printed" : "🖨 Send to Printer";
@@ -541,6 +542,9 @@ async function openDetail(orderNum) {
     btnMarkShipped.disabled = isConfirmed;
     btnMarkShipped.textContent = isConfirmed ? "📦 Shipped" : "📦 Mark Shipped";
   }
+  // Print Label (reprint) — only once a real carrier label has actually been
+  // bought and stored (Ready to Ship succeeded at some point for this order).
+  if (btnPrintLabel) btnPrintLabel.style.display = order.ship_label_data ? "" : "none";
   hideShipForm();
   const readyToShipForm = document.getElementById("detail-ready-to-ship-form");
   if (readyToShipForm) readyToShipForm.style.display = "none";
@@ -746,9 +750,46 @@ async function detailReadyToShip() {
     toast(`🚀 Shipped: ${orderNum} (${result.carrier} ${result.tracking_number})`, "success");
     hideReadyToShipForm();
     await openDetail(orderNum);
+    printShippingLabel(orderNum);
   } else {
     toast(`Ready to Ship failed: ${result.error} — use Mark Shipped instead`, "error");
     buyBtn.disabled = false; buyBtn.textContent = "🚀 Buy Label";
+  }
+}
+
+async function detailPrintLabel() {
+  if (!state.selectedOrder) return;
+  await printShippingLabel(state.selectedOrder.order_num);
+}
+
+async function printShippingLabel(orderNum) {
+  const win = window.open("", "_blank"); // open synchronously on click, before any await
+  const r = await fetch(`/api/get_shipping_label?order_num=${encodeURIComponent(orderNum)}`);
+  if (!r.ok) {
+    win?.close();
+    toast("No label on file for this order", "error");
+    return;
+  }
+  openAndPrintPdf(win, await r.blob());
+}
+
+async function detailTestLabel() {
+  if (!state.selectedOrder) return;
+  const orderNum = state.selectedOrder.order_num;
+  const weightLb = parseFloat(document.getElementById("ready-to-ship-weight").value);
+  if (!(weightLb > 0)) { toast("Enter a package weight greater than 0", "error"); return; }
+  const testBtn = document.getElementById("btn-ready-to-ship-test");
+  const win = window.open("", "_blank"); // open synchronously on click, before any await
+  testBtn.disabled = true; testBtn.textContent = "⏳ Creating test label…";
+  const result = await apiPost("test_ready_to_ship", { order_num: orderNum, weight_lb: weightLb });
+  testBtn.disabled = false; testBtn.textContent = "🧪 Test Label (void, not reported to PDX)";
+  if (result.ok && result.label_data) {
+    toast(`🧪 Test label created (void, tracking ${result.tracking_number}) — not reported to PDX`, "success");
+    const bytes = Uint8Array.from(atob(result.label_data), c => c.charCodeAt(0));
+    openAndPrintPdf(win, new Blob([bytes], { type: "application/pdf" }));
+  } else {
+    win?.close();
+    toast(`Test label failed: ${result.error || "no label returned"}`, "error");
   }
 }
 

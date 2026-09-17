@@ -1063,7 +1063,7 @@ class TestMarkReadyToShip:
         self._provider_with_mapping()
         monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
         monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
-                           lambda self, *a, **k: ({"tracking_number": "9400123", "shipment_cost": 8.5, "label_data": ""}, ""))
+                           lambda self, *a, **k: ({"tracking_number": "9400123", "shipment_cost": 8.5, "label_data": "ZmFrZXBkZg=="}, ""))
         monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
 
         resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
@@ -1071,6 +1071,7 @@ class TestMarkReadyToShip:
         assert data["ok"] is True
         assert data["tracking_number"] == "9400123"
         assert data["carrier"] == "USPS"
+        assert db.get_order("ORD001")["ship_label_data"] == "ZmFrZXBkZg=="
         assert db.has_shipped_notification("ORD001") is True
         assert db.get_order("ORD001")["status"] == "fulfilled"
 
@@ -1182,6 +1183,115 @@ class TestMarkReadyToShip:
         resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
         assert resp.get_json()["ok"] is True
         assert db.has_shipped_notification("ORD001") is True
+
+
+class TestGetShippingLabel:
+    def test_404_when_no_label_on_file(self, client):
+        db.upsert_order({"num": "ORD001", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"}, "destination": {"recipient": "C"}}})
+        resp = client.get("/api/get_shipping_label?order_num=ORD001")
+        assert resp.status_code == 404
+
+    def test_404_for_unknown_order(self, client):
+        resp = client.get("/api/get_shipping_label?order_num=NOPE")
+        assert resp.status_code == 404
+
+    def test_returns_stored_label_as_pdf(self, client):
+        import base64
+        db.upsert_order({"num": "ORD001", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"}, "destination": {"recipient": "C"}}})
+        db.save_order_ship_label("ORD001", base64.b64encode(b"%PDF-fake").decode())
+        resp = client.get("/api/get_shipping_label?order_num=ORD001")
+        assert resp.status_code == 200
+        assert resp.mimetype == "application/pdf"
+        assert resp.data == b"%PDF-fake"
+
+
+class TestReadyToShipTestMode:
+    """Pure dry-run: proves a shipping-provider mapping works without ever
+    touching the real order's provider linkage, PDX, or local status."""
+
+    def _order(self, num="ORD001", option_external_id="pdx_economy"):
+        return {
+            "num": num, "gallery": "G", "status": "received",
+            "placedAt": "2026-01-01T00:00:00Z", "items": [],
+            "shipping": {"option": {"externalId": option_external_id, "name": "Economy"},
+                        "destination": {"recipient": "Jane Doe", "address1": "123 Main St",
+                                       "city": "Orlando", "state": "FL", "zipCode": "32789"}},
+        }
+
+    def _provider_with_mapping(self, option_external_id="pdx_economy", pdx_carrier="USPS"):
+        pid = db.upsert_shipping_provider("shipstation", "SS", {"api_key": "k", "api_secret": "s"})
+        db.upsert_shipping_option_mapping(
+            pid, option_external_id, "Economy", "stamps_com", "usps_priority_mail", "", "none", pdx_carrier,
+        )
+        return pid
+
+    def test_order_not_found(self, client):
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "NOPE"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_no_provider_configured(self, client):
+        db.upsert_order(self._order())
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_no_mapping_for_shipping_option(self, client):
+        db.upsert_order(self._order(option_external_id="pdx_expedited"))
+        self._provider_with_mapping(option_external_id="pdx_economy")
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "mapping" in data["error"].lower()
+
+    def test_success_does_not_touch_real_order_state(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+
+        create_order_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order",
+                           lambda self, order: (create_order_calls.append(order), ("TEST-999", ""))[1])
+        create_label_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: (create_label_calls.append((a, k)),
+                                                  ({"tracking_number": "TESTTRACK", "label_data": "ZmFrZQ=="}, ""))[1])
+        pdx_calls = []
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (pdx_calls.append(1), (True, ""))[1])
+
+        resp = client.post("/api/test_ready_to_ship",
+                           data=json.dumps({"order_num": "ORD001", "weight_lb": 1.0}), content_type="application/json")
+        data = resp.get_json()
+
+        assert data["ok"] is True
+        assert data["tracking_number"] == "TESTTRACK"
+        assert data["label_data"] == "ZmFrZQ=="
+        # Never reports to PDX and never mutates the real order's local state —
+        # the whole point of a dry run.
+        assert not pdx_calls
+        assert db.has_shipped_notification("ORD001") is False
+        assert db.get_order("ORD001")["ship_external_order_id"] is None
+        assert db.get_order("ORD001")["ship_label_data"] is None
+        assert db.get_order("ORD001")["status"] != "fulfilled"
+        # Uses a disposable order number, never the real one, and passes
+        # test_label=True through to create_label.
+        assert create_order_calls[0]["order_num"] == "ORD001-TEST"
+        assert create_label_calls[0][1]["test_label"] is True
+
+    def test_label_creation_failure_is_reported(self, client, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("TEST-999", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", lambda self, *a, **k: (None, "carrier down"))
+
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert data["error"] == "carrier down"
 
 
 # ── Multi-station (same-location, onsite-only) ────────────────────────────────

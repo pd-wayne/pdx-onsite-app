@@ -1,6 +1,7 @@
 """
 server.py — Flask app for PDX Onsite
 """
+import base64
 import io
 import json
 import logging
@@ -731,11 +732,93 @@ def create_app(poller, ui_path: str = "") -> Flask:
             if ok or pdx_api.is_already_shipped_error(pdx_err):
                 db.confirm_order(order_num)
                 db.record_shipped_notification(order_num, mapping["pdx_carrier"], tracking_number, provider["provider_type"])
+                if result.get("label_data"):
+                    db.save_order_ship_label(order_num, result["label_data"])
                 push_event("order_confirmed", {"order_num": order_num})
                 _log(f"📦 Ready to ship: {order_num} ({mapping['pdx_carrier']} {tracking_number})")
                 return jsonify({"ok": True, "tracking_number": tracking_number, "carrier": mapping["pdx_carrier"]})
             _log(f"Ready to Ship: label created for {order_num} but PDX rejected it — {pdx_err}", "error")
             return jsonify({"ok": False, "error": f"Label created (tracking {tracking_number}) but PDX call failed: {pdx_err}"})
+
+    @app.route("/api/get_shipping_label")
+    def get_shipping_label():
+        """Re-serves the real carrier label already purchased for this order —
+        for reprinting, never for buying a new one (that only ever happens in
+        mark_ready_to_ship)."""
+        order_num = request.args.get("order_num", "")
+        order = db.get_order(order_num)
+        if not order or not order.get("ship_label_data"):
+            return jsonify({"error": "No label on file for this order"}), 404
+        pdf_bytes = base64.b64decode(order["ship_label_data"])
+        return Response(pdf_bytes, mimetype="application/pdf")
+
+    @app.route("/api/test_ready_to_ship", methods=["POST"])
+    def test_ready_to_ship():
+        """Pure dry-run for verifying a shipping-provider mapping actually works:
+        buys a real-but-void ShipStation label (testLabel=True, never charged)
+        using the same carrier/service/package/weight the real Ready to Ship
+        would use, but against a throwaway provider order — never touches the
+        real order's ship_provider_id/ship_external_order_id, never calls PDX,
+        never changes local order status. Safe to run against a real order."""
+        data = request.get_json() or {}
+        order_num = data.get("order_num", "")
+        cfg = config.load()
+        try:
+            weight_lb = float(data.get("weight_lb", cfg.get("default_package_weight_lb", 0.1)))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Invalid weight"})
+        if weight_lb <= 0:
+            return jsonify({"ok": False, "error": "Weight must be greater than 0"})
+
+        order = db.get_order(order_num)
+        if not order:
+            return jsonify({"ok": False, "error": "Order not found"})
+
+        provider = (db.get_shipping_provider(order["ship_provider_id"])
+                   if order.get("ship_provider_id") else db.get_enabled_shipping_provider())
+        if not provider:
+            return jsonify({"ok": False, "error": "No shipping provider configured"})
+
+        try:
+            raw = json.loads(order.get("raw_json") or "{}")
+        except Exception:
+            raw = {}
+        shipping = raw.get("shipping") or {}
+        option_external_id = (shipping.get("option") or {}).get("externalId", "")
+        mapping = db.get_shipping_option_mapping(provider["id"], option_external_id)
+        if not mapping or not mapping.get("carrier_code"):
+            return jsonify({"ok": False, "error":
+                           f"No shipping mapping configured for option \"{option_external_id}\" — set one up in Settings"})
+
+        try:
+            adapter = shipping_providers.get_adapter(provider["provider_type"], provider["credentials"])
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)})
+
+        # A fresh, disposable provider order — deliberately never touches this
+        # order's real ship_provider_id/ship_external_order_id.
+        test_external_order_id, err = adapter.create_order({
+            "order_num": f"{order_num}-TEST",
+            "placed_at": order.get("placed_at", ""),
+            "studio_name": cfg.get("studio_name", ""),
+            "destination": shipping.get("destination", {}),
+        })
+        if err:
+            return jsonify({"ok": False, "error": f"Could not create test provider order: {err}"})
+
+        ship_date = datetime.now().strftime("%Y-%m-%d")
+        result, err = adapter.create_label(
+            test_external_order_id, mapping["carrier_code"], mapping["service_code"],
+            mapping.get("package_code", ""), mapping.get("confirmation", "none"), ship_date,
+            weight_lb, test_label=True,
+        )
+        if err:
+            return jsonify({"ok": False, "error": err})
+        return jsonify({
+            "ok": True,
+            "tracking_number": result.get("tracking_number", ""),
+            "label_data": result.get("label_data", ""),
+        })
 
     # ── Job mode ───────────────────────────────────────────────────────────────
 
