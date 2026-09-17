@@ -29,17 +29,35 @@ async function apiGet(path, params = {}) {
   return r.json();
 }
 async function apiPost(path, body = {}) {
-  const r = await fetch("/api/" + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const headers = { "Content-Type": "application/json" };
+  // Attribution: when this browser is viewing a shared primary as a named
+  // secondary station (?station=NAME), tag every mutating call so the
+  // Activity Log can show which physical station did what.
+  if (state.viewingAsStation) headers["X-Station-Name"] = state.viewingAsStation;
+  const r = await fetch("/api/" + path, { method: "POST", headers, body: JSON.stringify(body) });
   return r.json();
 }
 
 // ── SSE ────────────────────────────────────────────────────────────────────
 function initSSE() {
   const es = new EventSource("/api/events");
+  es.onopen = () => {
+    if (state._stationWasDisconnected) {
+      state._stationWasDisconnected = false;
+      hideStationReconnectBanner();
+      toast("Reconnected", "success");
+      refreshAll();
+      loadActivityLog();
+    }
+  };
   es.onmessage = (e) => {
     try {
       const { event, data } = JSON.parse(e.data);
       if (event === "new_orders") { toast(`📦 ${data.count} new order(s)`, "info"); refreshAll(); }
+      else if (event === "station_demoted") {
+        toast("This station is no longer the main station — redirecting…", "info");
+        setTimeout(() => { window.location.href = data.redirect_url; }, 800);
+      }
       else if (event === "poll_complete") updatePollerStatus();
       else if (event === "download_done") refreshQueue();
       else if (event === "poll_error") { setApiStatus(false, data.error); updatePollerStatus(); }
@@ -61,7 +79,30 @@ function initSSE() {
       }
     } catch(e) { console.warn("[SSE]", e); }
   };
-  es.onerror = () => console.warn("[SSE] reconnecting…");
+  es.onerror = () => {
+    console.warn("[SSE] reconnecting…");
+    // Only meaningful for a secondary — losing the connection there means
+    // losing the actual backend (queue, printer, poller all live elsewhere).
+    // The browser's EventSource retries automatically; this just keeps
+    // staff informed instead of the screen silently going stale.
+    if (state.stationInfo?.role === "secondary") {
+      state._stationWasDisconnected = true;
+      showStationReconnectBanner();
+    }
+  };
+}
+
+function showStationReconnectBanner() {
+  const banner = document.getElementById("station-reconnect-banner");
+  const text = document.getElementById("station-reconnect-text");
+  if (!banner) return;
+  if (text) text.textContent = "Lost connection to the main station — showing the last data we had, reconnecting…";
+  banner.style.display = "flex";
+}
+
+function hideStationReconnectBanner() {
+  const banner = document.getElementById("station-reconnect-banner");
+  if (banner) banner.style.display = "none";
 }
 
 // ── Navigation ─────────────────────────────────────────────────────────────
@@ -474,6 +515,8 @@ async function openDetail(orderNum) {
   const btnPrintSlip = document.getElementById("btn-detail-print-slip");
   const btnMarkSlip = document.getElementById("btn-detail-mark-slip");
   const btnMarkShipped = document.getElementById("btn-detail-mark-shipped");
+  const btnReadyToShip = document.getElementById("btn-detail-ready-to-ship");
+  const btnPrintLabel = document.getElementById("btn-detail-print-label");
 
   btnFulfill.disabled = isFulfilled || isConfirmed;
   btnFulfill.textContent = (isFulfilled || isConfirmed) ? "🖨 Printed" : "🖨 Send to Printer";
@@ -485,15 +528,26 @@ async function openDetail(orderNum) {
   btnConfirm.textContent = isConfirmed ? "✅ Confirmed" : "✅ Confirm Pickup";
   if (btnReprintRcpt) btnReprintRcpt.style.display = isPickupOrder ? "" : "none";
 
-  // Mark Shipped applies to any non-pickup order (dropship or bulk-ship) —
-  // tells PDX the real carrier + tracking number, which is what should actually
-  // mark the order complete, instead of the "Pickup" placeholder Confirm Pickup sends.
+  // Ready to Ship (automated, via a configured shipping provider) and Mark
+  // Shipped (manual entry) both apply to any non-pickup order — Ready to Ship
+  // is the primary path, Mark Shipped is the fallback for anything it can't
+  // handle (no provider configured, no mapping for this shipping option, etc.)
+  if (btnReadyToShip) {
+    btnReadyToShip.style.display = isPickupOrder ? "none" : "";
+    btnReadyToShip.disabled = isConfirmed;
+    btnReadyToShip.textContent = isConfirmed ? "🚀 Shipped" : "🚀 Ready to Ship";
+  }
   if (btnMarkShipped) {
     btnMarkShipped.style.display = isPickupOrder ? "none" : "";
     btnMarkShipped.disabled = isConfirmed;
     btnMarkShipped.textContent = isConfirmed ? "📦 Shipped" : "📦 Mark Shipped";
   }
+  // Print Label (reprint) — only once a real carrier label has actually been
+  // bought and stored (Ready to Ship succeeded at some point for this order).
+  if (btnPrintLabel) btnPrintLabel.style.display = order.ship_label_data ? "" : "none";
   hideShipForm();
+  const readyToShipForm = document.getElementById("detail-ready-to-ship-form");
+  if (readyToShipForm) readyToShipForm.style.display = "none";
 
   // Print Slip / Mark Printed only apply to in-studio orders, and stay clickable
   // even after being done so staff can reprint/re-mark if something goes wrong.
@@ -654,6 +708,19 @@ function hideShipForm() {
   document.getElementById("ship-tracking").value = "";
 }
 
+function showReadyToShipForm() {
+  document.getElementById("btn-detail-ready-to-ship").style.display = "none";
+  document.getElementById("ready-to-ship-weight").value = state.default_package_weight_lb || 0.1;
+  document.getElementById("detail-ready-to-ship-form").style.display = "block";
+}
+
+function hideReadyToShipForm() {
+  const form = document.getElementById("detail-ready-to-ship-form");
+  if (form) form.style.display = "none";
+  const btn = document.getElementById("btn-detail-ready-to-ship");
+  if (btn) btn.style.display = "";
+}
+
 async function detailMarkShipped() {
   if (!state.selectedOrder) return;
   const carrier = document.getElementById("ship-carrier").value;
@@ -667,6 +734,62 @@ async function detailMarkShipped() {
     await openDetail(state.selectedOrder.order_num);
   } else {
     toast(`Mark shipped failed: ${result.error}`, "error");
+  }
+}
+
+async function detailReadyToShip() {
+  if (!state.selectedOrder) return;
+  const orderNum = state.selectedOrder.order_num;
+  const weightInput = document.getElementById("ready-to-ship-weight");
+  const weightLb = parseFloat(weightInput.value);
+  if (!(weightLb > 0)) { toast("Enter a package weight greater than 0", "error"); return; }
+  const buyBtn = document.querySelector("#detail-ready-to-ship-form .btn-confirm");
+  buyBtn.disabled = true; buyBtn.textContent = "⏳ Creating label…";
+  const result = await apiPost("mark_ready_to_ship", { order_num: orderNum, weight_lb: weightLb });
+  if (result.ok) {
+    toast(`🚀 Shipped: ${orderNum} (${result.carrier} ${result.tracking_number})`, "success");
+    hideReadyToShipForm();
+    await openDetail(orderNum);
+    printShippingLabel(orderNum);
+  } else {
+    toast(`Ready to Ship failed: ${result.error} — use Mark Shipped instead`, "error");
+    buyBtn.disabled = false; buyBtn.textContent = "🚀 Buy Label";
+  }
+}
+
+async function detailPrintLabel() {
+  if (!state.selectedOrder) return;
+  await printShippingLabel(state.selectedOrder.order_num);
+}
+
+async function printShippingLabel(orderNum) {
+  const win = window.open("", "_blank"); // open synchronously on click, before any await
+  const r = await fetch(`/api/get_shipping_label?order_num=${encodeURIComponent(orderNum)}`);
+  if (!r.ok) {
+    win?.close();
+    toast("No label on file for this order", "error");
+    return;
+  }
+  openAndPrintPdf(win, await r.blob());
+}
+
+async function detailTestLabel() {
+  if (!state.selectedOrder) return;
+  const orderNum = state.selectedOrder.order_num;
+  const weightLb = parseFloat(document.getElementById("ready-to-ship-weight").value);
+  if (!(weightLb > 0)) { toast("Enter a package weight greater than 0", "error"); return; }
+  const testBtn = document.getElementById("btn-ready-to-ship-test");
+  const win = window.open("", "_blank"); // open synchronously on click, before any await
+  testBtn.disabled = true; testBtn.textContent = "⏳ Creating test label…";
+  const result = await apiPost("test_ready_to_ship", { order_num: orderNum, weight_lb: weightLb });
+  testBtn.disabled = false; testBtn.textContent = "🧪 Test Label (void, not reported to PDX)";
+  if (result.ok && result.label_data) {
+    toast(`🧪 Test label created (void, tracking ${result.tracking_number}) — not reported to PDX`, "success");
+    const bytes = Uint8Array.from(atob(result.label_data), c => c.charCodeAt(0));
+    openAndPrintPdf(win, new Blob([bytes], { type: "application/pdf" }));
+  } else {
+    win?.close();
+    toast(`Test label failed: ${result.error || "no label returned"}`, "error");
   }
 }
 
@@ -1001,10 +1124,34 @@ function applySettingsView(view) {
     btn.classList.toggle("active", btn.dataset.view === view);
   });
   const hideOnsiteOnly = view === "in_studio";
-  ["settings-onsite-only-logo", "settings-onsite-only-samples", "settings-onsite-only-unclaimed"].forEach(id => {
+  ["settings-onsite-only-logo", "settings-onsite-only-samples", "settings-onsite-only-unclaimed",
+   "settings-onsite-only-receipt-printer", "settings-onsite-only-lan-share"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.style.display = hideOnsiteOnly ? "none" : "";
   });
+  ["nav-onsite-only-scan", "nav-onsite-only-samples"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = hideOnsiteOnly ? "none" : "";
+  });
+
+  // Reverse direction: shipping labels/carriers are a mail-order/in-studio
+  // concern — an onsite-only studio (pickup at the event) never needs this.
+  const hideInStudioOnly = view === "onsite";
+  ["settings-in-studio-only-shipping"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = hideInStudioOnly ? "none" : "";
+  });
+
+  // If the panel currently open just got hidden out from under the user
+  // (e.g. they were on Samples and switched to In-Studio view), fall back
+  // to Live Queue instead of leaving them on an inaccessible panel.
+  if (hideOnsiteOnly) {
+    const hiddenPanels = ["panel-scan", "panel-samples"];
+    const activePanel = document.querySelector(".panel.active");
+    if (activePanel && hiddenPanels.includes(activePanel.id)) {
+      showPanel("queue", document.querySelector('.nav-item[onclick*="queue"]'));
+    }
+  }
 }
 
 function initSettingsView() {
@@ -1014,7 +1161,7 @@ function initSettingsView() {
 async function loadSettings() {
   initSettingsView();
   try {
-    await Promise.all([loadDestinations(), loadRouting()]);
+    await Promise.all([loadDestinations(), loadRouting(), loadShippingProviders(), loadStationInfo()]);
   } catch(e) { console.warn("[Settings] routing load:", e); }
   try {
     const cfg = await apiGet("get_settings");
@@ -1035,6 +1182,8 @@ async function loadSettings() {
     document.getElementById("s-poll-interval").value = String(cfg.poll_interval || 60);
     document.getElementById("s-unclaimed-threshold").value = String(cfg.unclaimed_threshold || 30);
     document.getElementById("s-destination-health-threshold").value = String(cfg.destination_health_threshold || 10);
+    document.getElementById("s-default-package-weight").value = cfg.default_package_weight_lb ?? 0.1;
+    state.default_package_weight_lb = parseFloat(cfg.default_package_weight_lb) || 0.1;
     document.getElementById("s-image-folder").value = cfg.image_output_folder || "";
     document.getElementById("s-samples-folder").value = cfg.samples_folder || "";
     state.unclaimed_threshold = parseInt(cfg.unclaimed_threshold) || 30;
@@ -1048,6 +1197,227 @@ async function loadSettings() {
       document.getElementById("printer-manual-row").style.display = "block";
     });
   } catch(e) { toast("Could not load settings", "error"); }
+}
+
+// ── Multi-station (same-location, onsite-only workflow) ─────────────────────
+// One backend at a time (the primary) — every other station is just a
+// labeled window into it. state.stationInfo describes what THIS backend is;
+// state.viewingAsStation (from ?station=NAME) describes who's looking at it
+// through this particular browser tab, which may be a different machine
+// entirely once a secondary has navigated over to the primary's own page.
+let _msWizardStep = "idle"; // "idle" | "choose_role" | "searching" | "pick_station" | "name_secondary"
+let _msDiscovered = [];
+let _msPickedPrimary = null;
+
+async function loadStationInfo() {
+  try {
+    state.stationInfo = await apiGet("station/info");
+  } catch(e) {
+    state.stationInfo = { role: "solo", name: "", joined_primary_url: "", lan_url: "", studio_name: "" };
+  }
+  state.viewingAsStation = new URLSearchParams(location.search).get("station") || "";
+  renderStationBadge();
+  applyStationRoleVisibility();
+  renderMultiStationSettings();
+}
+
+function renderStationBadge() {
+  const badge = document.getElementById("station-badge");
+  if (!badge) return;
+  const info = state.stationInfo || {};
+  if (info.role === "primary") {
+    badge.style.display = "";
+    badge.style.color = "var(--red)";
+    badge.title = "Closing this station disconnects every other station connected to it.";
+    badge.textContent = `🔷 MAIN STATION — "${info.name}"`;
+  } else if (state.viewingAsStation) {
+    badge.style.display = "";
+    badge.style.color = "var(--text2)";
+    badge.title = "";
+    badge.textContent = `🔗 ${state.viewingAsStation} · connected to "${info.name || info.studio_name || "main station"}"`;
+  } else {
+    badge.style.display = "none";
+  }
+}
+
+function applyStationRoleVisibility() {
+  const isSecondary = state.stationInfo?.role === "secondary";
+  const navStation = document.getElementById("nav-secondary-only-station");
+  const navQueue   = document.getElementById("nav-queue");
+  const navScan    = document.getElementById("nav-onsite-only-scan");
+  const navSamples = document.getElementById("nav-onsite-only-samples");
+  if (navStation) navStation.style.display = isSecondary ? "" : "none";
+  // A secondary has no live data of its own — hide panels that would
+  // otherwise show empty/stale local content instead of the real thing.
+  [navQueue, navScan, navSamples].forEach(el => { if (el) el.style.display = isSecondary ? "none" : ""; });
+
+  if (isSecondary) {
+    const info = state.stationInfo || {};
+    const el = document.getElementById("station-connected-info");
+    if (el) el.innerHTML = `<div style="font-size:14px">🔗 This station ("${esc(info.name)}") is connected to the main station.</div>`;
+    showPanel("station", navStation);
+  }
+}
+
+function openPrimaryQueue() {
+  const info = state.stationInfo || {};
+  if (!info.joined_primary_url) return;
+  window.location.href = `${info.joined_primary_url}?station=${encodeURIComponent(info.name || "")}`;
+}
+
+async function _msBecomePrimary(name) {
+  const result = await apiPost("station/become_primary", { name });
+  if (!result.ok) { toast(`Could not become the main station: ${result.error}`, "error"); return false; }
+  if (result.other_primary_found) {
+    toast(`Warning: "${result.other_primary_found.name}" was also active on this network and couldn't be reached to hand off cleanly — this may cause a one-time duplicate print. Logged for review.`, "error", 8000);
+  } else {
+    toast(`"${name}" is now the main station`, "success");
+  }
+  await loadStationInfo();
+  await loadSettings();
+  return true;
+}
+
+async function promoteThisStation() {
+  const info = state.stationInfo || {};
+  const name = prompt('Name this station (e.g. "Front Desk"):', info.name || "");
+  if (!name || !name.trim()) return;
+  if (!confirm(`Make "${name.trim()}" the main station? It will start printing and downloading independently. If another station is currently main and reachable, it will be asked to step down first; if it can't be reached, this proceeds anyway and may cause a one-time duplicate print for anything already in progress there.`)) return;
+  await _msBecomePrimary(name.trim());
+}
+
+async function resetStationToSolo() {
+  if (!confirm("Disconnect this station and run it on its own? Any existing multi-station setup on this machine will be cleared.")) return;
+  const result = await apiPost("station/reset_to_solo", {});
+  if (result.ok) {
+    toast("Station reset to standalone", "success");
+    await loadStationInfo();
+    await loadSettings();
+  } else {
+    toast(`Reset failed: ${result.error}`, "error");
+  }
+}
+
+function renderMultiStationSettings() {
+  const wrap = document.getElementById("multistation-content");
+  if (!wrap) return;
+  const info = state.stationInfo || { role: "solo" };
+
+  if (info.role === "primary") {
+    wrap.innerHTML = `
+      <div class="form-hint" style="margin-bottom:10px;color:var(--red)">
+        🔷 This is your MAIN station — "${esc(info.name)}". Closing this disconnects every other station connected to it.
+      </div>
+      <button class="btn-secondary" onclick="resetStationToSolo()">Reset to standalone</button>`;
+    return;
+  }
+
+  if (info.role === "secondary") {
+    wrap.innerHTML = `
+      <div class="form-hint">
+        🔗 Connected as "${esc(info.name)}". Manage this from <a href="#" onclick="showPanel('station', document.getElementById('nav-secondary-only-station'));return false;">This Station</a> in the sidebar.
+      </div>`;
+    return;
+  }
+
+  // role === "solo" — the guided entry point
+  if (_msWizardStep === "idle") {
+    wrap.innerHTML = `
+      <div class="form-hint" style="margin-bottom:8px">Running more than one station for this event?</div>
+      <button class="btn-secondary" onclick="_msStep('choose_role')">+ Set up multi-station</button>`;
+    return;
+  }
+
+  if (_msWizardStep === "choose_role") {
+    wrap.innerHTML = `
+      <div class="form-hint" style="margin-bottom:10px">Is this your main station — the one with the printer?</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn-primary" onclick="msWizardBecomePrimary()">This is my main station</button>
+        <button class="btn-secondary" onclick="msWizardSearch()">I'm adding another station</button>
+      </div>
+      <button class="btn-xs btn-xs-ghost" style="margin-top:10px" onclick="_msStep('idle')">Cancel</button>`;
+    return;
+  }
+
+  if (_msWizardStep === "searching") {
+    wrap.innerHTML = `<div class="form-hint">🔍 Searching for stations on this network…</div>`;
+    return;
+  }
+
+  if (_msWizardStep === "pick_station") {
+    if (!_msDiscovered.length) {
+      wrap.innerHTML = `
+        <div class="form-hint" style="margin-bottom:10px;color:var(--amber)">
+          No stations found. Make sure your main station's app is open and both computers are on the same WiFi/network.
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn-secondary" onclick="msWizardSearch()">Retry</button>
+          <button class="btn-xs btn-xs-ghost" onclick="_msStep('idle')">Cancel</button>
+        </div>`;
+      return;
+    }
+    wrap.innerHTML = `
+      <div class="form-hint" style="margin-bottom:10px">Found ${_msDiscovered.length} station(s):</div>
+      <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">
+        ${_msDiscovered.map((s, i) => `
+          <button class="btn-secondary" style="text-align:left" onclick="msWizardPickStation(${i})">
+            ${esc(s.name)}${s.studio_name ? ` <span style="color:var(--text3);font-size:11px">(${esc(s.studio_name)})</span>` : ""}
+          </button>`).join("")}
+      </div>
+      <button class="btn-xs btn-xs-ghost" onclick="_msStep('idle')">Cancel</button>`;
+    return;
+  }
+
+  if (_msWizardStep === "name_secondary") {
+    wrap.innerHTML = `
+      <div class="form-hint" style="margin-bottom:8px">Name THIS station (e.g. "Check-in 2"):</div>
+      <div class="form-row-inline" style="gap:8px">
+        <input class="form-input" id="ms-secondary-name" placeholder="Check-in 2" style="flex:1">
+        <button class="btn-primary" onclick="msWizardJoin()">Connect</button>
+      </div>
+      <button class="btn-xs btn-xs-ghost" style="margin-top:10px" onclick="_msStep('idle')">Cancel</button>`;
+    return;
+  }
+}
+
+function _msStep(step) {
+  _msWizardStep = step;
+  if (step === "idle") { _msDiscovered = []; _msPickedPrimary = null; }
+  renderMultiStationSettings();
+}
+
+async function msWizardBecomePrimary() {
+  const name = prompt('Name this station (e.g. "Front Desk"):', "");
+  if (!name || !name.trim()) return;
+  const ok = await _msBecomePrimary(name.trim());
+  if (ok) _msStep("idle");
+}
+
+async function msWizardSearch() {
+  _msStep("searching");
+  const result = await apiGet("station/discover");
+  _msDiscovered = result.stations || [];
+  _msWizardStep = "pick_station";
+  renderMultiStationSettings();
+}
+
+function msWizardPickStation(i) {
+  _msPickedPrimary = _msDiscovered[i];
+  _msWizardStep = "name_secondary";
+  renderMultiStationSettings();
+  setTimeout(() => document.getElementById("ms-secondary-name")?.focus(), 0);
+}
+
+async function msWizardJoin() {
+  const name = document.getElementById("ms-secondary-name")?.value.trim();
+  if (!name) { toast("Enter a name for this station", "error"); return; }
+  if (!_msPickedPrimary) return;
+  const result = await apiPost("station/join", { name, primary_url: _msPickedPrimary.url, primary_name: _msPickedPrimary.name });
+  if (!result.ok) { toast(`Could not connect: ${result.error}`, "error"); return; }
+  toast(`Connected to "${_msPickedPrimary.name}" as "${name}"`, "success");
+  _msStep("idle");
+  await loadStationInfo();
+  await loadSettings();
 }
 
 async function loadPrinters(current = "") {
@@ -1103,6 +1473,7 @@ async function saveSettings() {
     poll_interval:        parseInt(document.getElementById("s-poll-interval").value),
     unclaimed_threshold:  parseInt(document.getElementById("s-unclaimed-threshold").value),
     destination_health_threshold: parseInt(document.getElementById("s-destination-health-threshold").value),
+    default_package_weight_lb: parseFloat(document.getElementById("s-default-package-weight").value) || 0.1,
     printer_name:         printerManual || printerSel,
     print_mode:           document.getElementById("s-print-mode").value,
     image_output_folder:  document.getElementById("s-image-folder").value.trim(),
@@ -1113,6 +1484,7 @@ async function saveSettings() {
   if (result.ok) {
     state.unclaimed_threshold = cfg.unclaimed_threshold;
     state.destination_health_threshold = cfg.destination_health_threshold;
+    state.default_package_weight_lb = cfg.default_package_weight_lb;
     if (cfg.samples_folder) state.samplesFolder = cfg.samples_folder;
     updateHotFolderWarning(cfg.image_output_folder);
     const printerDisplayName = document.getElementById("s-printer-display-name").value.trim();
@@ -1268,13 +1640,13 @@ function copyToClipboard(text) {
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────
-function toast(message, type="info") {
+function toast(message, type="info", duration=3200) {
   const el = document.createElement("div");
   el.className = `toast ${type}`;
   const icons = { success:"✓", error:"✗", info:"ℹ" };
   el.innerHTML = `<span>${icons[type]||"ℹ"}</span><span>${esc(message)}</span>`;
   document.getElementById("toast-container").appendChild(el);
-  setTimeout(() => { el.style.animation = "toastOut .2s ease forwards"; setTimeout(() => el.remove(), 200); }, 3200);
+  setTimeout(() => { el.style.animation = "toastOut .2s ease forwards"; setTimeout(() => el.remove(), 200); }, duration);
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -1380,8 +1752,14 @@ async function loadDestinations() {
 }
 
 function shouldShowDestinationsAdvanced() {
-  if (state.destinations.length > 1) return true;
-  try { return localStorage.getItem("pdx_destinations_expanded") === "1"; } catch(e) { return false; }
+  // >1 (not >0): a single destination is just the auto-seeded default from
+  // the basic Image Output Folder field, not an actual multi-destination
+  // opt-in — that case must stay muted. _destinationsSetupActive is an
+  // in-memory-only exception so the section stays open while the studio is
+  // actively adding their first extra destination; unlike the old
+  // localStorage flag it never survives a reload, so an abandoned setup
+  // goes back to muted instead of getting stuck open forever.
+  return state.destinations.length > 1 || state._destinationsSetupActive === true;
 }
 
 function updateDestinationsVisibility() {
@@ -1402,7 +1780,7 @@ function updateDestinationsVisibility() {
 }
 
 function expandDestinations() {
-  try { localStorage.setItem("pdx_destinations_expanded", "1"); } catch(e) {}
+  state._destinationsSetupActive = true;
   updateDestinationsVisibility();
 }
 
@@ -1626,6 +2004,263 @@ async function discoverSpecs() {
   }
 }
 
+// ── Shipping providers ──────────────────────────────────────────────────────
+// Onsite creates the order in the provider at ingestion time and creates the
+// label on demand when staff click "Ready to Ship" on an order — there's no
+// polling schedule to configure here, just credentials and a mapping from
+// each PDX shipping option to the carrier/service/package to request.
+const PDX_CARRIERS = ["UPS", "UPSMI", "FEDEX", "USPS", "DHL"];
+const CONFIRMATION_TYPES = ["none", "delivery", "signature", "adult_signature", "direct_signature"];
+
+async function loadShippingProviders() {
+  state.shippingProviderCatalog = await apiGet("get_shipping_provider_catalog");
+  state.shippingProviders = await apiGet("get_shipping_providers");
+  state.knownShippingOptions = await apiGet("get_known_shipping_options");
+  renderProviderTypeOptions();
+  updateShippingVisibility();
+  await renderShippingProviders();
+}
+
+// Each studio only ever needs one shipping-label connection, so this mirrors
+// the Destinations collapsed-prompt pattern: stays tucked away and inert
+// until the studio actually opts in by adding a provider, instead of always
+// showing an "+ Add" list that implies multiple providers are expected.
+function updateShippingVisibility() {
+  const collapsed = document.getElementById("shipping-collapsed-prompt");
+  const advanced = document.getElementById("shipping-advanced-wrap");
+  if (!collapsed || !advanced) return;
+  const hasProvider = (state.shippingProviders || []).length > 0;
+  collapsed.style.display = hasProvider ? "none" : "block";
+  advanced.style.display = hasProvider ? "block" : "none";
+}
+
+function renderProviderTypeOptions() {
+  const sel = document.getElementById("new-provider-type");
+  if (!sel) return;
+  sel.innerHTML = (state.shippingProviderCatalog || [])
+    .map(p => `<option value="${esc(p.provider_type)}">${esc(p.display_name)}</option>`).join("");
+}
+
+function _catalogFor(providerType) {
+  return (state.shippingProviderCatalog || []).find(p => p.provider_type === providerType);
+}
+
+async function addShippingProvider() {
+  const providerType = document.getElementById("new-provider-type").value;
+  const catalogEntry = _catalogFor(providerType);
+  if (!catalogEntry) return;
+  const result = await apiPost("save_shipping_provider", {
+    provider_type: providerType, label: catalogEntry.display_name, credentials: {}, enabled: true,
+  });
+  if (result.ok) {
+    await loadShippingProviders();
+    toast(`${catalogEntry.display_name} added — enter credentials and Save`, "success");
+  } else {
+    toast(`Add failed: ${result.error}`, "error");
+  }
+}
+
+async function renderShippingProviders() {
+  const wrap = document.getElementById("shipping-providers-list");
+  if (!wrap) return;
+  const providers = state.shippingProviders || [];
+  if (!providers.length) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:8px 0">No shipping providers connected yet.</div>`;
+    return;
+  }
+  wrap.innerHTML = providers.map(p => renderProviderCard(p)).join("");
+  await Promise.all(providers.map(p => loadShippingOptionMappings(p.id)));
+}
+
+function renderProviderCard(p) {
+  const catalogEntry = _catalogFor(p.provider_type) || { credential_fields: [] };
+  const credsHtml = catalogEntry.credential_fields.map(f => `
+    <input class="form-input" type="${f.secret ? "password" : "text"}"
+           id="ship-cred-${p.id}-${esc(f.key)}" placeholder="${esc(f.label)}"
+           value="${esc(p.credentials?.[f.key] || "")}">
+  `).join("");
+
+  return `
+  <div class="ship-provider-card" id="ship-provider-${p.id}">
+    <div class="ship-provider-header">
+      <input class="form-input" id="ship-label-${p.id}" value="${esc(p.label)}" placeholder="Name">
+      <span class="ship-provider-status">${esc(catalogEntry.display_name || p.provider_type)}</span>
+      <label class="ship-provider-toggle">
+        <input type="checkbox" id="ship-enabled-${p.id}" ${p.enabled ? "checked" : ""}> Enabled
+      </label>
+      <button class="btn-xs btn-xs-ghost dest-delete" onclick="deleteShippingProviderRow(${p.id})">✕</button>
+    </div>
+    <div class="ship-provider-creds">${credsHtml}</div>
+    <div class="ship-provider-actions">
+      <button class="btn-xs btn-xs-blue" onclick="saveShippingProviderRow(${p.id})">Save</button>
+      <button class="btn-xs btn-xs-ghost" onclick="discoverShippingOptionsRow(${p.id})">🔍 Discover Shipping Options</button>
+      <span class="ship-provider-status" id="ship-discover-status-${p.id}"></span>
+    </div>
+    <div id="ship-option-mappings-${p.id}"></div>
+  </div>`;
+}
+
+async function saveShippingProviderRow(id) {
+  const provider = (state.shippingProviders || []).find(p => p.id === id);
+  if (!provider) return;
+  const catalogEntry = _catalogFor(provider.provider_type) || { credential_fields: [] };
+  const credentials = {};
+  catalogEntry.credential_fields.forEach(f => {
+    credentials[f.key] = document.getElementById(`ship-cred-${id}-${f.key}`)?.value.trim() || "";
+  });
+  const result = await apiPost("save_shipping_provider", {
+    id,
+    provider_type: provider.provider_type,
+    label: document.getElementById(`ship-label-${id}`).value.trim() || catalogEntry.display_name,
+    credentials,
+    enabled: document.getElementById(`ship-enabled-${id}`).checked,
+  });
+  if (result.ok) {
+    toast("Provider saved", "success");
+    await loadShippingProviders();
+  } else {
+    toast(`Save failed: ${result.error}`, "error");
+  }
+}
+
+async function deleteShippingProviderRow(id) {
+  if (!confirm("Remove this shipping provider and its shipping-option mappings?")) return;
+  const result = await apiPost("delete_shipping_provider", { id });
+  if (result.ok) await loadShippingProviders();
+  else toast(`Delete failed: ${result.error}`, "error");
+}
+
+// Discovery just re-renders against state.knownShippingOptions (already loaded
+// from real order history) — nothing to fetch from the provider for this step,
+// discovery against the provider itself happens per-row when a carrier is picked.
+async function discoverShippingOptionsRow(id) {
+  state.knownShippingOptions = await apiGet("get_known_shipping_options");
+  await loadShippingOptionMappings(id);
+  const statusEl = document.getElementById(`ship-discover-status-${id}`);
+  if (statusEl) statusEl.textContent = `Found ${state.knownShippingOptions.length} shipping option(s) from order history`;
+}
+
+function _providerHasCredentials(provider) {
+  const catalogEntry = _catalogFor(provider.provider_type);
+  if (!catalogEntry) return false;
+  return catalogEntry.credential_fields.every(f => (provider.credentials?.[f.key] || "").trim());
+}
+
+async function loadShippingOptionMappings(providerId) {
+  const wrap = document.getElementById(`ship-option-mappings-${providerId}`);
+  if (!wrap) return;
+
+  const provider = (state.shippingProviders || []).find(p => p.id === providerId);
+  if (!provider || !_providerHasCredentials(provider)) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:6px 0">Enter your API credentials above and click Save to set up shipping options.</div>`;
+    return;
+  }
+
+  const options = state.knownShippingOptions || [];
+  if (!options.length) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:6px 0">No shipping options seen yet — they'll appear here once orders arrive, or click Discover Shipping Options to check now.</div>`;
+    return;
+  }
+  const existing = await apiGet("get_shipping_option_mappings", { provider_id: providerId });
+  const byOption = {};
+  existing.forEach(m => { byOption[m.pdx_option_external_id] = m; });
+
+  const carriersResult = await apiGet("list_provider_carriers", { provider_id: providerId });
+  const carriers = carriersResult.ok ? carriersResult.carriers : [];
+  if (!carriersResult.ok) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:6px 0">Could not load carriers: ${esc(carriersResult.error || "")}</div>`;
+    return;
+  }
+
+  const header = `
+    <div class="ship-option-header">
+      <div>PDX Shipping Option</div>
+      <div>Carrier</div>
+      <div>Service</div>
+      <div>Package</div>
+      <div>Confirmation</div>
+      <div>PDX Carrier</div>
+      <div></div>
+    </div>`;
+
+  wrap.innerHTML = header + options.map((opt, i) => {
+    const m = byOption[opt.external_id] || {};
+    const rowId = `${providerId}-${i}`;
+    return `
+    <div class="ship-option-row" id="ship-option-row-${rowId}" data-option-id="${esc(opt.external_id)}" data-provider-id="${providerId}">
+      <div class="ship-option-label">${!m.pdx_carrier ? "⚠ " : ""}${esc(opt.name || opt.external_id)}<div class="ship-option-code">${esc(opt.external_id)}</div></div>
+      <select class="form-select" id="ship-opt-carrier-${rowId}" onchange="onShippingOptionCarrierChange('${rowId}')">
+        <option value="">— Select carrier —</option>
+        ${carriers.map(c => `<option value="${esc(c.code)}" ${c.code === m.carrier_code ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
+      </select>
+      <select class="form-select" id="ship-opt-service-${rowId}"><option value="">— Select carrier first —</option></select>
+      <select class="form-select" id="ship-opt-package-${rowId}"><option value="">(none)</option></select>
+      <select class="form-select" id="ship-opt-confirmation-${rowId}">
+        ${CONFIRMATION_TYPES.map(c => `<option value="${c}" ${c === (m.confirmation || "none") ? "selected" : ""}>${c}</option>`).join("")}
+      </select>
+      <select class="form-select" id="ship-opt-pdxcarrier-${rowId}">
+        <option value="">— Do not map —</option>
+        ${PDX_CARRIERS.map(c => `<option value="${c}" ${c === m.pdx_carrier ? "selected" : ""}>${c}</option>`).join("")}
+      </select>
+      <button class="btn-xs btn-xs-blue" onclick="saveShippingOptionMappingRow('${rowId}')">Save</button>
+    </div>`;
+  }).join("");
+
+  // Pre-populate service/package dropdowns for rows that already have a carrier chosen.
+  options.forEach((opt, i) => {
+    const m = byOption[opt.external_id];
+    if (m && m.carrier_code) onShippingOptionCarrierChange(`${providerId}-${i}`, m.service_code, m.package_code);
+  });
+}
+
+async function onShippingOptionCarrierChange(rowId, preselectService = "", preselectPackage = "") {
+  const row = document.getElementById(`ship-option-row-${rowId}`);
+  const providerId = row?.dataset.providerId;
+  const carrierCode = document.getElementById(`ship-opt-carrier-${rowId}`)?.value;
+  const serviceSel = document.getElementById(`ship-opt-service-${rowId}`);
+  const packageSel = document.getElementById(`ship-opt-package-${rowId}`);
+  if (!carrierCode) {
+    serviceSel.innerHTML = `<option value="">— Select carrier first —</option>`;
+    packageSel.innerHTML = `<option value="">(none)</option>`;
+    return;
+  }
+  serviceSel.innerHTML = `<option value="">Loading…</option>`;
+  packageSel.innerHTML = `<option value="">Loading…</option>`;
+  const [servicesResult, packagesResult] = await Promise.all([
+    apiGet("list_provider_services", { provider_id: providerId, carrier_code: carrierCode }),
+    apiGet("list_provider_packages", { provider_id: providerId, carrier_code: carrierCode }),
+  ]);
+  serviceSel.innerHTML = servicesResult.ok
+    ? servicesResult.services.map(s => `<option value="${esc(s.code)}" ${s.code === preselectService ? "selected" : ""}>${esc(s.name)}</option>`).join("")
+    : `<option value="">Failed to load</option>`;
+  packageSel.innerHTML = `<option value="">(none — carrier default)</option>` + (packagesResult.ok
+    ? packagesResult.packages.map(p => `<option value="${esc(p.code)}" ${p.code === preselectPackage ? "selected" : ""}>${esc(p.name)}</option>`).join("")
+    : "");
+}
+
+async function saveShippingOptionMappingRow(rowId) {
+  const row = document.getElementById(`ship-option-row-${rowId}`);
+  if (!row) return;
+  const providerId = parseInt(row.dataset.providerId);
+  const optionId = row.dataset.optionId;
+  const result = await apiPost("save_shipping_option_mapping", {
+    provider_id: providerId,
+    pdx_option_external_id: optionId,
+    pdx_option_name: (state.knownShippingOptions || []).find(o => o.external_id === optionId)?.name || "",
+    carrier_code: document.getElementById(`ship-opt-carrier-${rowId}`).value,
+    service_code: document.getElementById(`ship-opt-service-${rowId}`).value,
+    package_code: document.getElementById(`ship-opt-package-${rowId}`).value,
+    confirmation: document.getElementById(`ship-opt-confirmation-${rowId}`).value,
+    pdx_carrier: document.getElementById(`ship-opt-pdxcarrier-${rowId}`).value || null,
+  });
+  if (result.ok) {
+    toast(`Mapping saved for "${optionId}"`, "success");
+    await loadShippingOptionMappings(providerId);
+  } else {
+    toast(`Save failed: ${result.error}`, "error");
+  }
+}
+
 // ── Job mode ────────────────────────────────────────────────────────────────
 async function toggleJobMode(gallery, currentMode) {
   const newMode = currentMode === "onsite" ? "in_studio" : "onsite";
@@ -1641,6 +2276,7 @@ async function toggleJobMode(gallery, currentMode) {
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
   restoreJobFilter();
+  try { await loadStationInfo(); } catch(e) { console.warn(e); }
   try { initSSE(); } catch(e) { console.warn(e); }
   try { await refreshAll(); } catch(e) { console.warn(e); }
   try { await updatePollerStatus(); } catch(e) { console.warn(e); }
@@ -1650,11 +2286,15 @@ async function init() {
   // Also check hot folder and show warning banner if missing
   try {
     const cfg = await apiGet("get_settings");
-    if (!cfg.lab_id || !cfg.api_key) {
+    // A secondary station is expected to have no PDX credentials of its own
+    // — it defers entirely to the primary — so don't override its forced
+    // "This Station" panel with the normal first-run nudge into Settings.
+    if ((!cfg.lab_id || !cfg.api_key) && state.stationInfo?.role !== "secondary") {
       showPanel("settings", document.querySelector(".nav-item[onclick*=\"'settings'\"]"));
     }
     updateHotFolderWarning(cfg.image_output_folder);
     state.destination_health_threshold = parseInt(cfg.destination_health_threshold) || 10;
+    state.default_package_weight_lb = parseFloat(cfg.default_package_weight_lb) || 0.1;
     if (cfg.logo_path) loadLogoPreview();
   } catch(e) {}
   try {

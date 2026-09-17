@@ -90,6 +90,27 @@ class TestConfigSave:
         loaded = config.load()
         assert loaded["custom_key"] == "custom_value"
 
+    def test_a_partial_save_does_not_reset_other_fields_to_defaults(self, tmp_path, monkeypatch):
+        """Regression test: found by code review, not by a caller hitting it.
+        save() used to merge onto DEFAULTS instead of the currently-saved
+        config — safe only as long as every caller always submits every
+        field. The Settings page's normal Save button doesn't know about
+        station_role/station_name/joined_primary_url, so a plain settings
+        save was silently resetting a configured multi-station role back to
+        "solo" every time. Any partial save, for any field, must not touch
+        fields it didn't mention."""
+        monkeypatch.setattr(config, "CONFIG_PATH", str(tmp_path / "cfg.json"))
+        config.save({"lab_id": "LAB1", "api_key": "KEY1", "station_role": "primary", "station_name": "Front Desk"})
+
+        # A normal Settings-page save only ever sends the settings-form
+        # fields — never station_role/station_name.
+        config.save({"lab_id": "LAB1", "api_key": "KEY1", "studio_name": "My Studio"})
+
+        cfg = config.load()
+        assert cfg["station_role"] == "primary"
+        assert cfg["station_name"] == "Front Desk"
+        assert cfg["studio_name"] == "My Studio"
+
 
 class TestPerEnvironmentCredentials:
     """Production and staging each keep their own saved Lab ID/API Key.

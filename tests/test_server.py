@@ -413,6 +413,30 @@ class TestOrderActions:
         assert data["ok"] is False
         assert "error" in data
 
+    def test_confirm_order_tags_activity_log_with_station_name(self, client, monkeypatch):
+        import api as pdx_api
+        db.upsert_order({"num": "ORD001", "gallery": "Test Job",
+                         "shipping": {"option": {"externalId": "pdx_pickup"}, "destination": {}}})
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        client.post("/api/confirm_order", data=json.dumps({"order_num": "ORD001"}),
+                   content_type="application/json", headers={"X-Station-Name": "Check-in 2"})
+
+        log = client.get("/api/activity_log").get_json()
+        assert any("ORD001" in e["message"] and "Check-in 2" in e["message"] for e in log)
+
+    def test_confirm_order_without_station_header_has_no_tag(self, client, monkeypatch):
+        import api as pdx_api
+        db.upsert_order({"num": "ORD002", "gallery": "Test Job",
+                         "shipping": {"option": {"externalId": "pdx_pickup"}, "destination": {}}})
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        client.post("/api/confirm_order", data=json.dumps({"order_num": "ORD002"}), content_type="application/json")
+
+        log = client.get("/api/activity_log").get_json()
+        entry = next(e for e in log if "ORD002" in e["message"])
+        assert entry["message"] == "✅ Confirmed (scanned): ORD002"
+
     def test_fulfill_order_no_images(self, client):
         resp = client.post("/api/fulfill_order",
                            data=json.dumps({"order_num": "NOTEXIST"}),
@@ -478,6 +502,62 @@ class TestMarkShipped:
         assert data["ok"] is False
         assert data["error"] == "bad api key"
         assert db.get_order("SHIP002")["status"] == "received"
+
+    def test_records_shipped_notification_for_dedup(self, client, monkeypatch):
+        """Regression test for a real bug found by code review: mark_shipped
+        confirmed the order but never wrote to shipped_notifications, so the
+        dedup log this session built specifically to prevent double-shipping
+        across paths (manual Mark Shipped vs. automated Ready to Ship) only
+        ever covered half of it."""
+        import api as pdx_api
+        db.upsert_order({"num": "SHIP003", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"}, "destination": {"recipient": "C"}}})
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        client.post("/api/mark_shipped",
+                   data=json.dumps({"order_num": "SHIP003", "carrier": "UPS", "tracking_number": "1Z1"}),
+                   content_type="application/json")
+        assert db.has_shipped_notification("SHIP003") is True
+
+    def test_rejects_an_order_already_shipped(self, client):
+        db.upsert_order({"num": "SHIP004", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"}, "destination": {"recipient": "C"}}})
+        db.record_shipped_notification("SHIP004", "UPS", "1Z1", "manual")
+
+        resp = client.post("/api/mark_shipped",
+                           data=json.dumps({"order_num": "SHIP004", "carrier": "FEDEX", "tracking_number": "999"}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_prevents_ready_to_ship_from_double_shipping_after_manual_mark(self, client, monkeypatch):
+        """The real end-to-end cross-path guarantee: an order manually marked
+        shipped through the actual /api/mark_shipped endpoint (not a direct
+        db insert) must block Ready to Ship from also buying a real label
+        for it — this is the exact scenario the shipped_notifications table
+        exists to prevent, and it silently didn't work until this fix."""
+        import api as pdx_api
+        import shipping_providers as sp
+        db.upsert_order({"num": "SHIP005", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "pdx_economy", "name": "Economy"},
+                                     "destination": {"recipient": "Jane Doe", "address1": "123 Main St",
+                                                    "city": "Orlando", "state": "FL", "zipCode": "32789"}}})
+        pid = db.upsert_shipping_provider("shipstation", "SS", {"api_key": "k", "api_secret": "s"})
+        db.upsert_shipping_option_mapping(pid, "pdx_economy", "Economy", "stamps_com", "usps_priority_mail", "", "none", "USPS")
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+        create_label_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: (create_label_calls.append(1), ({"tracking_number": "X"}, ""))[1])
+
+        client.post("/api/mark_shipped",
+                   data=json.dumps({"order_num": "SHIP005", "carrier": "UPS", "tracking_number": "1Z1"}),
+                   content_type="application/json")
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "SHIP005"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+        assert not create_label_calls  # no real label was purchased for the second path
 
 
 class TestReprintImagesResetsStatus:
@@ -699,10 +779,57 @@ class TestSystem:
         log = client.get("/api/activity_log").get_json()
         assert any(entry["message"] == "Test entry" for entry in log)
 
+    def test_export_logs_returns_zip_with_activity_log(self, client):
+        import io
+        import zipfile
+
+        client.post("/api/activity_log_write",
+                    data=json.dumps({"message": "Export me", "level": "info"}),
+                    content_type="application/json")
+        resp = client.get("/api/export_logs")
+        assert resp.status_code == 200
+        assert resp.content_type == "application/zip"
+        assert "attachment" in resp.headers.get("Content-Disposition", "")
+
+        zf = zipfile.ZipFile(io.BytesIO(resp.data))
+        assert set(zf.namelist()) == {"activity_log.txt", "pdx_onsite.log"}
+        assert "Export me" in zf.read("activity_log.txt").decode("utf-8")
+
+    def test_export_logs_activity_log_not_capped_at_50(self, client):
+        for i in range(60):
+            client.post("/api/activity_log_write",
+                        data=json.dumps({"message": f"Entry {i}", "level": "info"}),
+                        content_type="application/json")
+        import io
+        import zipfile
+        resp = client.get("/api/export_logs")
+        zf = zipfile.ZipFile(io.BytesIO(resp.data))
+        text = zf.read("activity_log.txt").decode("utf-8")
+        assert "Entry 0" in text  # the live panel's limit=50 would have dropped this
+
     def test_sse_endpoint_content_type(self, client):
         with client.get("/api/events") as resp:
             assert resp.status_code == 200
             assert "text/event-stream" in resp.content_type
+
+    def test_sse_broadcasts_to_every_connected_client(self, client):
+        """Regression test for the single-shared-Queue bug: with two stations
+        connected (same-location multi-station workflow), an event used to go
+        to whichever client's generator happened to dequeue it first, not
+        both. Each client must now get its own copy of every event."""
+        import server
+
+        with client.get("/api/events") as resp1, client.get("/api/events") as resp2:
+            iter1, iter2 = resp1.iter_encoded(), resp2.iter_encoded()
+            next(iter1)  # "connected" handshake
+            next(iter2)
+
+            server.push_event("broadcast_test", {"n": 1})
+
+            chunk1 = next(iter1)
+            chunk2 = next(iter2)
+            assert b"broadcast_test" in chunk1
+            assert b"broadcast_test" in chunk2
 
     def test_samples_list_no_folder(self, client):
         data = client.get("/api/samples/list").get_json()
@@ -712,3 +839,686 @@ class TestSystem:
     def test_image_not_found(self, client):
         resp = client.get("/api/image/ORD001/fake.jpg")
         assert resp.status_code in (404, 404)
+
+
+class TestShippingProviderEndpoints:
+    def test_catalog_includes_shipstation(self, client):
+        catalog = client.get("/api/get_shipping_provider_catalog").get_json()
+        assert any(p["provider_type"] == "shipstation" for p in catalog)
+
+    def test_empty_providers_list(self, client):
+        assert client.get("/api/get_shipping_providers").get_json() == []
+
+    def test_save_and_list_provider(self, client):
+        resp = client.post("/api/save_shipping_provider", data=json.dumps({
+            "provider_type": "shipstation", "label": "Bassetti ShipStation",
+            "credentials": {"api_key": "k", "api_secret": "s"}, "enabled": True,
+        }), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is True
+        providers = client.get("/api/get_shipping_providers").get_json()
+        assert len(providers) == 1
+        assert providers[0]["label"] == "Bassetti ShipStation"
+
+    def test_save_rejects_unknown_provider_type(self, client):
+        resp = client.post("/api/save_shipping_provider", data=json.dumps({
+            "provider_type": "not_real", "label": "X", "credentials": {},
+        }), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_update_existing_provider(self, client):
+        pid = client.post("/api/save_shipping_provider", data=json.dumps({
+            "provider_type": "shipstation", "label": "SS", "credentials": {"api_key": "k1", "api_secret": "s1"},
+        }), content_type="application/json").get_json()["id"]
+        client.post("/api/save_shipping_provider", data=json.dumps({
+            "id": pid, "provider_type": "shipstation", "label": "SS Renamed",
+            "credentials": {"api_key": "k2", "api_secret": "s2"},
+        }), content_type="application/json")
+        providers = client.get("/api/get_shipping_providers").get_json()
+        assert len(providers) == 1
+        assert providers[0]["label"] == "SS Renamed"
+
+    def test_delete_provider(self, client):
+        pid = client.post("/api/save_shipping_provider", data=json.dumps({
+            "provider_type": "shipstation", "label": "SS", "credentials": {},
+        }), content_type="application/json").get_json()["id"]
+        resp = client.post("/api/delete_shipping_provider", data=json.dumps({"id": pid}), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert client.get("/api/get_shipping_providers").get_json() == []
+
+    def _make_provider(self, client):
+        return client.post("/api/save_shipping_provider", data=json.dumps({
+            "provider_type": "shipstation", "label": "SS", "credentials": {"api_key": "k", "api_secret": "s"},
+        }), content_type="application/json").get_json()["id"]
+
+    def test_list_provider_carriers(self, client, monkeypatch):
+        import shipping_providers as sp
+        pid = self._make_provider(client)
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "list_carriers",
+                           lambda self: ([{"code": "ups", "name": "UPS"}], ""))
+        resp = client.get(f"/api/list_provider_carriers?provider_id={pid}")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["carriers"] == [{"code": "ups", "name": "UPS"}]
+
+    def test_list_provider_carriers_not_found(self, client):
+        resp = client.get("/api/list_provider_carriers?provider_id=999")
+        assert resp.get_json()["ok"] is False
+
+    def test_list_provider_services(self, client, monkeypatch):
+        import shipping_providers as sp
+        pid = self._make_provider(client)
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "list_services",
+                           lambda self, carrier_code: ([{"code": "ups_ground", "name": "UPS Ground"}], ""))
+        resp = client.get(f"/api/list_provider_services?provider_id={pid}&carrier_code=ups")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["services"] == [{"code": "ups_ground", "name": "UPS Ground"}]
+
+    def test_list_provider_services_requires_carrier_code(self, client):
+        pid = self._make_provider(client)
+        resp = client.get(f"/api/list_provider_services?provider_id={pid}")
+        assert resp.get_json()["ok"] is False
+
+    def test_list_provider_packages(self, client, monkeypatch):
+        import shipping_providers as sp
+        pid = self._make_provider(client)
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "list_packages",
+                           lambda self, carrier_code: ([{"code": "large_flat_rate_box", "name": "Large Flat Rate Box"}], ""))
+        resp = client.get(f"/api/list_provider_packages?provider_id={pid}&carrier_code=stamps_com")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["packages"][0]["code"] == "large_flat_rate_box"
+
+    def test_get_known_shipping_options(self, client):
+        db.upsert_order({"num": "ORD001", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "pdx_economy", "name": "Economy"},
+                                      "destination": {"recipient": "C"}}})
+        options = client.get("/api/get_known_shipping_options").get_json()
+        assert {"external_id": "pdx_economy", "name": "Economy"} in options
+
+    def test_save_and_get_shipping_option_mapping(self, client):
+        pid = self._make_provider(client)
+        resp = client.post("/api/save_shipping_option_mapping", data=json.dumps({
+            "provider_id": pid, "pdx_option_external_id": "pdx_economy", "pdx_option_name": "Economy",
+            "carrier_code": "stamps_com", "service_code": "usps_priority_mail",
+            "package_code": "large_flat_rate_box", "confirmation": "none", "pdx_carrier": "USPS",
+        }), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        mappings = client.get(f"/api/get_shipping_option_mappings?provider_id={pid}").get_json()
+        assert mappings[0]["pdx_carrier"] == "USPS"
+
+    def test_save_shipping_option_mapping_requires_fields(self, client):
+        resp = client.post("/api/save_shipping_option_mapping", data=json.dumps({}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_get_shipping_option_mappings_no_provider_id(self, client):
+        assert client.get("/api/get_shipping_option_mappings").get_json() == []
+
+
+class TestMarkReadyToShip:
+    def _order(self, num="ORD001", option_external_id="pdx_economy"):
+        return {
+            "num": num, "gallery": "G", "status": "received",
+            "placedAt": "2026-01-01T00:00:00Z", "items": [],
+            "shipping": {"option": {"externalId": option_external_id, "name": "Economy"},
+                        "destination": {"recipient": "Jane Doe", "address1": "123 Main St",
+                                       "city": "Orlando", "state": "FL", "zipCode": "32789"}},
+        }
+
+    def _provider_with_mapping(self, option_external_id="pdx_economy", pdx_carrier="USPS"):
+        pid = db.upsert_shipping_provider("shipstation", "SS", {"api_key": "k", "api_secret": "s"})
+        db.upsert_shipping_option_mapping(
+            pid, option_external_id, "Economy", "stamps_com", "usps_priority_mail", "", "none", pdx_carrier,
+        )
+        return pid
+
+    def test_order_not_found(self, client):
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "NOPE"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_already_shipped_is_rejected(self, client):
+        db.upsert_order(self._order())
+        db.record_shipped_notification("ORD001", "USPS", "9400", "manual")
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_no_provider_configured(self, client):
+        db.upsert_order(self._order())
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_no_mapping_for_shipping_option(self, client):
+        db.upsert_order(self._order(option_external_id="pdx_expedited"))
+        self._provider_with_mapping(option_external_id="pdx_economy")  # different option
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "mapping" in data["error"].lower()
+
+    def test_rejects_mapping_with_no_pdx_carrier_before_buying_a_label(self, client, monkeypatch):
+        """Regression test for a real bug found by code review: a mapping can
+        have a real carrier_code/service_code set while pdx_carrier is left
+        "— Do not map —" (saved as null) in Settings. Without this check,
+        Ready to Ship would buy a real label, then fail the PDX callback
+        with carrier=None — a paid, orphaned label with nothing to show for
+        it. This must be caught before create_label is ever called."""
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        pid = db.upsert_shipping_provider("shipstation", "SS", {"api_key": "k", "api_secret": "s"})
+        db.upsert_shipping_option_mapping(pid, "pdx_economy", "Economy", "stamps_com", "usps_priority_mail", "", "none", None)
+        create_label_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: (create_label_calls.append(1), ({"tracking_number": "X"}, ""))[1])
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "PDX Carrier" in data["error"]
+        assert not create_label_calls
+
+    def test_concurrent_requests_for_the_same_order_only_buy_one_label(self, client, monkeypatch):
+        """Regression test for a real race found by code review: two
+        near-simultaneous requests for the same order (now a real
+        possibility with multi-station sharing one backend, or just a
+        double-click) used to both pass has_shipped_notification() before
+        either recorded it, each buying a real label. A lock around the
+        whole check-through-record section closes that window."""
+        import shipping_providers as sp
+        import api as pdx_api
+        import time
+
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+        create_label_calls = []
+
+        def slow_create_label(self, *a, **k):
+            create_label_calls.append(1)
+            time.sleep(0.15)  # widen the race window so both threads overlap
+            return {"tracking_number": "9400123"}, ""
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", slow_create_label)
+
+        results = []
+        def call():
+            resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+            results.append(resp.get_json())
+
+        t1 = threading.Thread(target=call)
+        t2 = threading.Thread(target=call)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        assert len(create_label_calls) == 1, "a real label must only ever be purchased once for the same order"
+        oks = [r["ok"] for r in results]
+        assert oks.count(True) == 1
+        assert oks.count(False) == 1
+
+    def test_success_creates_order_and_label_and_confirms(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: ({"tracking_number": "9400123", "shipment_cost": 8.5, "label_data": "ZmFrZXBkZg=="}, ""))
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["tracking_number"] == "9400123"
+        assert data["carrier"] == "USPS"
+        assert db.get_order("ORD001")["ship_label_data"] == "ZmFrZXBkZg=="
+        assert db.has_shipped_notification("ORD001") is True
+        assert db.get_order("ORD001")["status"] == "fulfilled"
+
+    def test_uses_default_weight_when_none_provided(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        import config
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        captured = {}
+        def fake_create_label(self, external_order_id, carrier_code, service_code, package_code,
+                              confirmation, ship_date, weight_lb, test_label=False):
+            captured["weight_lb"] = weight_lb
+            return {"tracking_number": "9400123"}, ""
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", fake_create_label)
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert captured["weight_lb"] == config.load()["default_package_weight_lb"]
+
+    def test_staff_supplied_weight_overrides_default(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        captured = {}
+        def fake_create_label(self, external_order_id, carrier_code, service_code, package_code,
+                              confirmation, ship_date, weight_lb, test_label=False):
+            captured["weight_lb"] = weight_lb
+            return {"tracking_number": "9400123"}, ""
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", fake_create_label)
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        resp = client.post("/api/mark_ready_to_ship",
+                           data=json.dumps({"order_num": "ORD001", "weight_lb": 2.5}), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert captured["weight_lb"] == 2.5
+
+    def test_rejects_zero_or_negative_weight_before_buying_a_label(self, client, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        create_label_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: (create_label_calls.append(1), ({"tracking_number": "X"}, ""))[1])
+
+        resp = client.post("/api/mark_ready_to_ship",
+                           data=json.dumps({"order_num": "ORD001", "weight_lb": 0}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+        assert not create_label_calls
+
+    def test_reuses_existing_provider_order_id_without_recreating(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        pid = self._provider_with_mapping()
+        db.set_order_ship_provider("ORD001", pid, "999")
+        create_order_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order",
+                           lambda self, order: (create_order_calls.append(1), ("should not be used", ""))[1])
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: ({"tracking_number": "9400123"}, ""))
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert create_order_calls == []  # existing external_order_id was reused
+
+    def test_label_creation_failure_does_not_confirm(self, client, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", lambda self, *a, **k: (None, "carrier down"))
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+        assert db.has_shipped_notification("ORD001") is False
+        assert db.get_order("ORD001")["status"] == "received"
+
+    def test_pdx_rejection_does_not_confirm_but_label_already_bought(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: ({"tracking_number": "9400123"}, ""))
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (False, "HTTP 500"))
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "9400123" in data["error"]  # surfaced so staff can Mark Shipped manually with this tracking number
+        assert db.has_shipped_notification("ORD001") is False
+
+    def test_pdx_already_shipped_rejection_is_treated_as_success(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: ({"tracking_number": "9400123"}, ""))
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (False, "Order already shipped"))
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert db.has_shipped_notification("ORD001") is True
+
+
+class TestGetShippingLabel:
+    def test_404_when_no_label_on_file(self, client):
+        db.upsert_order({"num": "ORD001", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"}, "destination": {"recipient": "C"}}})
+        resp = client.get("/api/get_shipping_label?order_num=ORD001")
+        assert resp.status_code == 404
+
+    def test_404_for_unknown_order(self, client):
+        resp = client.get("/api/get_shipping_label?order_num=NOPE")
+        assert resp.status_code == 404
+
+    def test_returns_stored_label_as_pdf(self, client):
+        import base64
+        db.upsert_order({"num": "ORD001", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy"}, "destination": {"recipient": "C"}}})
+        db.save_order_ship_label("ORD001", base64.b64encode(b"%PDF-fake").decode())
+        resp = client.get("/api/get_shipping_label?order_num=ORD001")
+        assert resp.status_code == 200
+        assert resp.mimetype == "application/pdf"
+        assert resp.data == b"%PDF-fake"
+
+
+class TestReadyToShipTestMode:
+    """Pure dry-run: proves a shipping-provider mapping works without ever
+    touching the real order's provider linkage, PDX, or local status."""
+
+    def _order(self, num="ORD001", option_external_id="pdx_economy"):
+        return {
+            "num": num, "gallery": "G", "status": "received",
+            "placedAt": "2026-01-01T00:00:00Z", "items": [],
+            "shipping": {"option": {"externalId": option_external_id, "name": "Economy"},
+                        "destination": {"recipient": "Jane Doe", "address1": "123 Main St",
+                                       "city": "Orlando", "state": "FL", "zipCode": "32789"}},
+        }
+
+    def _provider_with_mapping(self, option_external_id="pdx_economy", pdx_carrier="USPS"):
+        pid = db.upsert_shipping_provider("shipstation", "SS", {"api_key": "k", "api_secret": "s"})
+        db.upsert_shipping_option_mapping(
+            pid, option_external_id, "Economy", "stamps_com", "usps_priority_mail", "", "none", pdx_carrier,
+        )
+        return pid
+
+    def test_order_not_found(self, client):
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "NOPE"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_no_provider_configured(self, client):
+        db.upsert_order(self._order())
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+
+    def test_no_mapping_for_shipping_option(self, client):
+        db.upsert_order(self._order(option_external_id="pdx_expedited"))
+        self._provider_with_mapping(option_external_id="pdx_economy")
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "mapping" in data["error"].lower()
+
+    def test_success_does_not_touch_real_order_state(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+
+        create_order_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order",
+                           lambda self, order: (create_order_calls.append(order), ("TEST-999", ""))[1])
+        create_label_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: (create_label_calls.append((a, k)),
+                                                  ({"tracking_number": "TESTTRACK", "label_data": "ZmFrZQ=="}, ""))[1])
+        pdx_calls = []
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (pdx_calls.append(1), (True, ""))[1])
+
+        resp = client.post("/api/test_ready_to_ship",
+                           data=json.dumps({"order_num": "ORD001", "weight_lb": 1.0}), content_type="application/json")
+        data = resp.get_json()
+
+        assert data["ok"] is True
+        assert data["tracking_number"] == "TESTTRACK"
+        assert data["label_data"] == "ZmFrZQ=="
+        # Never reports to PDX and never mutates the real order's local state —
+        # the whole point of a dry run.
+        assert not pdx_calls
+        assert db.has_shipped_notification("ORD001") is False
+        assert db.get_order("ORD001")["ship_external_order_id"] is None
+        assert db.get_order("ORD001")["ship_label_data"] is None
+        assert db.get_order("ORD001")["status"] != "fulfilled"
+        # Uses a disposable order number, never the real one, and passes
+        # test_label=True through to create_label.
+        assert create_order_calls[0]["order_num"] == "ORD001-TEST"
+        assert create_label_calls[0][1]["test_label"] is True
+
+    def test_label_creation_failure_is_reported(self, client, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("TEST-999", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", lambda self, *a, **k: (None, "carrier down"))
+
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert data["error"] == "carrier down"
+
+
+# ── Multi-station (same-location, onsite-only) ────────────────────────────────
+# discovery.discover_stations and requests.post (the inter-station handoff
+# call) are mocked throughout — real UDP broadcast isn't reliably available
+# in a sandboxed/CI environment (see tests/test_discovery.py, which covers
+# the real wire protocol over loopback instead). DiscoveryResponder.start/stop
+# are also mocked so tests never bind a real socket.
+
+class TestMultiStation:
+    @pytest.fixture(autouse=True)
+    def _no_real_network(self, monkeypatch):
+        import discovery
+        monkeypatch.setattr(discovery.DiscoveryResponder, "start", lambda self: None)
+        monkeypatch.setattr(discovery.DiscoveryResponder, "stop", lambda self: None)
+        monkeypatch.setattr(discovery, "discover_stations", lambda **kw: [])
+
+    def test_station_info_defaults_to_solo(self, client):
+        data = client.get("/api/station/info").get_json()
+        assert data["role"] == "solo"
+        assert data["name"] == ""
+        assert data["joined_primary_url"] == ""
+
+    def test_become_primary_requires_name(self, client):
+        resp = client.post("/api/station/become_primary", json={})
+        assert resp.get_json()["ok"] is False
+
+    def test_become_primary_fails_cleanly_when_lan_address_undeterminable(self, client, monkeypatch):
+        """Regression test for a real bug found by code review: get_lan_ip()
+        used to fall back to "127.0.0.1" on failure (e.g. no default
+        gateway — an isolated event LAN) instead of None. That address would
+        get broadcast as this station's own, and every other station trying
+        to join it would silently connect to their own loopback instead of
+        the real primary — undiscoverable and unexplained. Becoming primary
+        with no real address must fail loudly instead."""
+        import server as server_module
+        monkeypatch.setattr(server_module, "get_lan_ip", lambda: None)
+
+        resp = client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "network address" in data["error"].lower()
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "solo"  # never promoted
+
+    def test_become_primary_sets_role(self, client):
+        resp = client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["other_primary_found"] is None
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "primary"
+        assert info["name"] == "Front Desk"
+
+    def test_become_primary_starts_poller_when_credentials_exist(self, client, app):
+        client.post("/api/save_settings", json={"lab_id": "LAB1", "api_key": "KEY1"})
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        # The MockPoller instance server.py is holding — reach it the same
+        # way other tests confirm poller state.
+        assert client.get("/api/get_poller_status").get_json()["running"] is True
+
+    def test_become_primary_preserves_other_settings(self, client):
+        """config.save() merges onto the currently-saved config, not onto
+        bare DEFAULTS — otherwise this partial station-role update would
+        silently wipe lab_id/studio_name/etc. back to defaults."""
+        client.post("/api/save_settings", json={"lab_id": "LAB1", "api_key": "KEY1", "studio_name": "My Studio"})
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        cfg = client.get("/api/get_settings").get_json()
+        assert cfg["lab_id"] == "LAB1"
+        assert cfg["studio_name"] == "My Studio"
+
+    def test_normal_settings_save_does_not_reset_station_role(self, client):
+        """Regression test for a real bug found by code review: the normal
+        Settings-page Save button only ever submits the settings-form fields
+        — it has no idea station_role/station_name exist — so saving
+        settings after becoming primary must not silently demote this
+        station back to solo."""
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        client.post("/api/save_settings", json={"lab_id": "LAB1", "api_key": "KEY1", "studio_name": "My Studio"})
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "primary"
+        assert info["name"] == "Front Desk"
+
+    def test_become_primary_no_warning_when_nothing_else_found(self, client):
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        log = client.get("/api/activity_log").get_json()
+        assert not any("Another primary" in e["message"] for e in log)
+
+    def test_become_primary_handoff_succeeds_when_another_primary_reachable(self, client, monkeypatch):
+        import discovery
+        import requests
+
+        monkeypatch.setattr(discovery, "discover_stations",
+                            lambda **kw: [{"name": "Old Primary", "url": "http://10.0.0.5:5050", "studio_name": ""}])
+        calls = []
+
+        class FakeResp:
+            def json(self_inner):
+                return {"ok": True}
+
+        def fake_post(url, json=None, timeout=None):
+            calls.append((url, json))
+            return FakeResp()
+
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        resp = client.post("/api/station/become_primary", json={"name": "Check-in 2"})
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["other_primary_found"] is None  # handoff succeeded, so no conflict remains
+
+        assert len(calls) == 1
+        url, payload = calls[0]
+        assert url == "http://10.0.0.5:5050/api/station/step_down"
+        assert payload["new_primary_name"] == "Check-in 2"
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "primary"
+
+    def test_become_primary_falls_back_to_soft_warning_when_handoff_unreachable(self, client, monkeypatch):
+        import discovery
+        import requests
+
+        monkeypatch.setattr(discovery, "discover_stations",
+                            lambda **kw: [{"name": "Old Primary", "url": "http://10.0.0.5:5050", "studio_name": ""}])
+
+        def fake_post(*a, **k):
+            raise ConnectionError("unreachable")
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        resp = client.post("/api/station/become_primary", json={"name": "Check-in 2"})
+        data = resp.get_json()
+        assert data["ok"] is True  # emergency promotion still proceeds
+        assert data["other_primary_found"]["name"] == "Old Primary"
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "primary"  # promotion happened despite the conflict
+
+        log = client.get("/api/activity_log").get_json()
+        assert any("Old Primary" in e["message"] and e["level"] == "error" for e in log)
+
+    def test_become_primary_returns_error_when_handoff_explicitly_refused(self, client, monkeypatch):
+        import discovery
+        import requests
+
+        monkeypatch.setattr(discovery, "discover_stations",
+                            lambda **kw: [{"name": "Old Primary", "url": "http://10.0.0.5:5050", "studio_name": ""}])
+
+        class FakeResp:
+            def json(self_inner):
+                return {"ok": False, "error": "This station is not currently the primary"}
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp())
+
+        resp = client.post("/api/station/become_primary", json={"name": "Check-in 2"})
+        data = resp.get_json()
+        assert data["ok"] is False
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "solo"  # never promoted — the refusal must block it
+
+    def test_station_join_requires_name_and_primary_url(self, client):
+        resp = client.post("/api/station/join", json={"name": "Check-in 2"})
+        assert resp.get_json()["ok"] is False
+
+    def test_station_join_sets_secondary_role(self, client):
+        resp = client.post("/api/station/join",
+                           json={"name": "Check-in 2", "primary_url": "http://10.0.0.5:5050", "primary_name": "Front Desk"})
+        assert resp.get_json()["ok"] is True
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "secondary"
+        assert info["name"] == "Check-in 2"
+        assert info["joined_primary_url"] == "http://10.0.0.5:5050"
+
+    def test_step_down_requires_currently_being_primary(self, client):
+        resp = client.post("/api/station/step_down",
+                           json={"new_primary_url": "http://x:5050", "new_primary_name": "X"})
+        assert resp.get_json()["ok"] is False
+
+    def test_step_down_demotes_and_pushes_redirect_event(self, client):
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+
+        with client.get("/api/events") as resp:
+            it = resp.iter_encoded()
+            next(it)  # "connected" handshake
+
+            step_down = client.post("/api/station/step_down",
+                                    json={"new_primary_url": "http://10.0.0.9:5050", "new_primary_name": "New Primary"})
+            assert step_down.get_json()["ok"] is True
+
+            # step_down logs an activity line (pushed first) THEN the
+            # station_demoted redirect event — read both, don't assume order.
+            combined = next(it) + next(it)
+            assert b"station_demoted" in combined
+            assert b"10.0.0.9" in combined
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "secondary"
+        assert info["joined_primary_url"] == "http://10.0.0.9:5050"
+        assert info["name"] == "Front Desk"  # this station's own name survives the demotion
+
+    def test_reset_to_solo_clears_role_and_stops_poller(self, client):
+        client.post("/api/save_settings", json={"lab_id": "LAB1", "api_key": "KEY1"})
+        client.post("/api/station/become_primary", json={"name": "Front Desk"})
+        assert client.get("/api/get_poller_status").get_json()["running"] is True
+
+        resp = client.post("/api/station/reset_to_solo")
+        assert resp.get_json()["ok"] is True
+
+        info = client.get("/api/station/info").get_json()
+        assert info["role"] == "solo"
+        assert info["name"] == ""
+        assert info["joined_primary_url"] == ""
+        assert client.get("/api/get_poller_status").get_json()["running"] is False
+
+    def test_discover_endpoint_excludes_self(self, client, monkeypatch):
+        import discovery
+        import server as server_module
+        my_url = f"http://{server_module.get_lan_ip()}:5050"
+        monkeypatch.setattr(discovery, "discover_stations",
+                            lambda **kw: [{"name": "Me", "url": my_url, "studio_name": ""},
+                                         {"name": "Someone Else", "url": "http://10.0.0.5:5050", "studio_name": ""}])
+        data = client.get("/api/station/discover").get_json()
+        names = [s["name"] for s in data["stations"]]
+        assert "Me" not in names
+        assert "Someone Else" in names

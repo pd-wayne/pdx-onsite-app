@@ -559,6 +559,36 @@ body{display:flex;flex-direction:column}
 .dest-delete{color:var(--red)!important;opacity:.6}
 .dest-delete:hover{opacity:1}
 
+/* ── Shipping providers ──────────────────────────────────────────────────── */
+.ship-provider-card{
+  background:var(--bg3); border:1px solid var(--border); border-radius:var(--radius);
+  padding:12px 14px; margin-bottom:10px;
+}
+.ship-provider-header{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px}
+.ship-provider-header .form-input{width:160px; flex-shrink:0}
+.ship-provider-toggle{display:flex; align-items:center; gap:5px; font-size:11px; color:var(--text2); white-space:nowrap; cursor:pointer}
+.ship-provider-creds{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px}
+.ship-provider-creds .form-input{flex:1; min-width:140px}
+.ship-provider-actions{display:flex; gap:8px; align-items:center; margin-bottom:4px; flex-wrap:wrap}
+.ship-provider-status{font-size:11px; color:var(--text3)}
+.ship-option-row{
+  display:grid; grid-template-columns:1.3fr 1fr 1fr 1fr .8fr .8fr auto;
+  align-items:center; gap:8px; padding:8px 0;
+  border-top:1px solid var(--border); overflow-x:auto;
+}
+.ship-option-label{font-size:12px; color:var(--text); min-width:0}
+.ship-option-code{font-family:var(--font-mono,monospace); font-size:10px; color:var(--text3); margin-top:2px}
+.ship-option-row select{font-size:11px; padding:3px 6px; min-width:0}
+.ship-option-header{
+  display:grid; grid-template-columns:1.3fr 1fr 1fr 1fr .8fr .8fr auto;
+  gap:8px; padding:0 0 4px;
+  font-size:10px; text-transform:uppercase; letter-spacing:.03em; color:var(--text3);
+}
+@media (max-width:900px){
+  .ship-option-row{grid-template-columns:1fr; gap:4px}
+  .ship-option-header{display:none}
+}
+
 /* ── Routing table ─────────────────────────────────────────────────────────── */
 .routing-unassigned td{background:rgba(234,179,8,.04)}
 .routing-unassigned .td-mono{color:var(--amber)}

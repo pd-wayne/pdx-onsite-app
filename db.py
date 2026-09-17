@@ -117,6 +117,38 @@ def init_db():
                 printed_at     TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS shipping_providers (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider_type        TEXT NOT NULL,
+                label                TEXT NOT NULL,
+                credentials_json     TEXT NOT NULL DEFAULT '{}',
+                enabled              INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS shipping_option_mappings (
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider_id             INTEGER NOT NULL REFERENCES shipping_providers(id),
+                pdx_option_external_id  TEXT NOT NULL,
+                pdx_option_name         TEXT,
+                carrier_code            TEXT,
+                service_code            TEXT,
+                package_code            TEXT,
+                confirmation            TEXT NOT NULL DEFAULT 'none',
+                pdx_carrier             TEXT,
+                UNIQUE(provider_id, pdx_option_external_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS shipped_notifications (
+                order_num       TEXT PRIMARY KEY,
+                carrier         TEXT NOT NULL,
+                tracking_number TEXT NOT NULL DEFAULT '',
+                source          TEXT NOT NULL,
+                notified_at     TEXT NOT NULL
+            )
+        """)
 
         # ── Indexes ───────────────────────────────────────────────────────────
         conn.execute("CREATE INDEX IF NOT EXISTS idx_status     ON orders(status)")
@@ -124,6 +156,7 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_order ON order_items(order_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_status ON order_items(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_routing_spec ON product_routing(print_spec)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ship_option_mappings_provider ON shipping_option_mappings(provider_id)")
         conn.commit()
 
         # ── Migrations for existing installs ──────────────────────────────────
@@ -133,6 +166,9 @@ def init_db():
             ("images_json",     "TEXT"),
             ("fulfillment_mode", "TEXT"),
             ("is_bulk",         "INTEGER NOT NULL DEFAULT 0"),
+            ("ship_provider_id",      "INTEGER"),
+            ("ship_external_order_id", "TEXT"),
+            ("ship_label_data",       "TEXT"),
         ])
         _migrate_columns(conn, "jobs", [
             ("fulfillment_mode", "TEXT NOT NULL DEFAULT 'onsite'"),
@@ -866,4 +902,187 @@ def set_setting(key: str, value):
             "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
             (key, json.dumps(value))
         )
+        conn.commit()
+
+
+# ── Shipping providers (ShipStation, etc.) ─────────────────────────────────────
+# Onsite creates the order in the provider at ingestion time (see poller.py) and
+# creates the label on demand when staff click "Ready to Ship" — there's no
+# periodic polling loop, so these rows are just "configured or not," no schedule.
+
+def get_shipping_providers() -> list:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM shipping_providers ORDER BY id").fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["credentials"] = json.loads(d.pop("credentials_json") or "{}")
+            result.append(d)
+        return result
+
+
+def get_shipping_provider(provider_id: int) -> Optional[dict]:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM shipping_providers WHERE id = ?", (provider_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["credentials"] = json.loads(d.pop("credentials_json") or "{}")
+        return d
+
+
+def get_enabled_shipping_provider() -> Optional[dict]:
+    """Most setups have exactly one active shipping provider — this is what
+    the ingestion-time order-creation step and "Ready to Ship" use."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM shipping_providers WHERE enabled = 1 ORDER BY id LIMIT 1").fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["credentials"] = json.loads(d.pop("credentials_json") or "{}")
+        return d
+
+
+def upsert_shipping_provider(provider_type: str, label: str, credentials: dict,
+                             enabled: bool = True, provider_id: Optional[int] = None) -> int:
+    creds_json = json.dumps(credentials or {})
+    with get_conn() as conn:
+        if provider_id:
+            conn.execute("""
+                UPDATE shipping_providers
+                SET provider_type = ?, label = ?, credentials_json = ?, enabled = ?
+                WHERE id = ?
+            """, (provider_type, label, creds_json, int(enabled), provider_id))
+            conn.commit()
+            return provider_id
+        cur = conn.execute("""
+            INSERT INTO shipping_providers (provider_type, label, credentials_json, enabled)
+            VALUES (?, ?, ?, ?)
+        """, (provider_type, label, creds_json, int(enabled)))
+        conn.commit()
+        return cur.lastrowid
+
+
+def delete_shipping_provider(provider_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM shipping_option_mappings WHERE provider_id = ?", (provider_id,))
+        conn.execute("DELETE FROM shipping_providers WHERE id = ?", (provider_id,))
+        conn.commit()
+
+
+# ── Shipping-option mappings ────────────────────────────────────────────────────
+# One row per PDX shipping option (shipping.option.externalId on a real order) →
+# the carrier/service/package/confirmation to request from the provider, plus
+# the PDX carrier enum that combination corresponds to. All chosen together by
+# a human in Settings — never guessed, never auto-selected.
+
+def get_known_pdx_shipping_options() -> list:
+    """Distinct shipping options actually seen on real orders so far — scanned
+    from raw_json, the same "discover from real data" pattern as Discover
+    Products. Returns [{external_id, name}, ...]."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT raw_json FROM orders WHERE raw_json IS NOT NULL").fetchall()
+    seen = {}
+    for row in rows:
+        try:
+            raw = json.loads(row["raw_json"])
+        except Exception:
+            continue
+        option = (raw.get("shipping") or {}).get("option") or {}
+        external_id = option.get("externalId", "")
+        if external_id and external_id not in seen:
+            seen[external_id] = option.get("name", "")
+    return [{"external_id": k, "name": v} for k, v in seen.items()]
+
+
+def get_shipping_option_mappings(provider_id: int) -> list:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM shipping_option_mappings WHERE provider_id = ? ORDER BY pdx_option_external_id",
+            (provider_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_shipping_option_mapping(provider_id: int, pdx_option_external_id: str) -> Optional[dict]:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM shipping_option_mappings WHERE provider_id = ? AND pdx_option_external_id = ?",
+            (provider_id, pdx_option_external_id)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def upsert_shipping_option_mapping(provider_id: int, pdx_option_external_id: str, pdx_option_name: str,
+                                   carrier_code: str, service_code: str, package_code: str,
+                                   confirmation: str, pdx_carrier: str) -> int:
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT id FROM shipping_option_mappings WHERE provider_id = ? AND pdx_option_external_id = ?",
+            (provider_id, pdx_option_external_id)
+        ).fetchone()
+        if existing:
+            conn.execute("""
+                UPDATE shipping_option_mappings
+                SET pdx_option_name = ?, carrier_code = ?, service_code = ?, package_code = ?,
+                    confirmation = ?, pdx_carrier = ?
+                WHERE id = ?
+            """, (pdx_option_name, carrier_code, service_code, package_code, confirmation, pdx_carrier, existing["id"]))
+            conn.commit()
+            return existing["id"]
+        cur = conn.execute("""
+            INSERT INTO shipping_option_mappings
+                (provider_id, pdx_option_external_id, pdx_option_name, carrier_code,
+                 service_code, package_code, confirmation, pdx_carrier)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (provider_id, pdx_option_external_id, pdx_option_name, carrier_code,
+              service_code, package_code, confirmation, pdx_carrier))
+        conn.commit()
+        return cur.lastrowid
+
+
+# ── Per-order shipping-provider linkage ─────────────────────────────────────────
+
+def set_order_ship_provider(order_num: str, provider_id: int, external_order_id: str):
+    """Records the provider order created for a PDX order at ingestion time, so
+    "Ready to Ship" knows which provider order to attach a label to later."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE orders SET ship_provider_id = ?, ship_external_order_id = ? WHERE order_num = ?",
+            (provider_id, external_order_id, order_num)
+        )
+        conn.commit()
+
+
+def save_order_ship_label(order_num: str, label_data: str):
+    """Persists the real carrier shipping label (base64 PDF from the provider's
+    create_label response) so staff can reprint it later without buying a new
+    one — separate from the in-studio packing slip, which is a different PDF
+    the app renders itself."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE orders SET ship_label_data = ? WHERE order_num = ?",
+            (label_data, order_num)
+        )
+        conn.commit()
+
+
+# ── Shipped-order dedup log ─────────────────────────────────────────────────────
+# Shared by manual Mark Shipped and every automated shipping-provider poller so
+# no order is ever reported to PDX as shipped twice, regardless of which path
+# reported it first or whether the order even exists in the local `orders` table.
+
+def has_shipped_notification(order_num: str) -> bool:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT 1 FROM shipped_notifications WHERE order_num = ?", (order_num,)
+        ).fetchone() is not None
+
+
+def record_shipped_notification(order_num: str, carrier: str, tracking_number: str, source: str):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO shipped_notifications (order_num, carrier, tracking_number, source, notified_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (order_num, carrier, tracking_number or "", source, datetime.now().isoformat()))
         conn.commit()

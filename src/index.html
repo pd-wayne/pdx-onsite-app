@@ -12,6 +12,7 @@
 <!-- Status Bar -->
 <div id="status-bar">
   <span class="status-brand">PDX Onsite</span>
+  <span id="station-badge" style="display:none"></span>
   <div class="status-item"><div class="status-dot" id="api-dot"></div><span id="api-status-text">Connecting…</span></div>
   <span class="status-sep">|</span>
   <div class="status-item">Last poll: <span id="last-poll-text">—</span></div>
@@ -37,9 +38,10 @@
 <div id="app">
   <nav id="sidebar">
     <div class="nav-section-label">Workflow</div>
-    <div class="nav-item active" onclick="showPanel('queue',this)"><span class="nav-icon">📋</span><span>Live Queue</span><span class="nav-badge zero" id="badge-queue">0</span></div>
-    <div class="nav-item" onclick="showPanel('scan',this)"><span class="nav-icon">📷</span><span>Scan to Confirm</span></div>
-    <div class="nav-item" onclick="showPanel('samples',this)"><span class="nav-icon">🖼</span><span>Samples</span></div>
+    <div class="nav-item active" id="nav-queue" onclick="showPanel('queue',this)"><span class="nav-icon">📋</span><span>Live Queue</span><span class="nav-badge zero" id="badge-queue">0</span></div>
+    <div class="nav-item" id="nav-onsite-only-scan" onclick="showPanel('scan',this)"><span class="nav-icon">📷</span><span>Scan to Confirm</span></div>
+    <div class="nav-item" id="nav-onsite-only-samples" onclick="showPanel('samples',this)"><span class="nav-icon">🖼</span><span>Samples</span></div>
+    <div class="nav-item" id="nav-secondary-only-station" onclick="showPanel('station',this)" style="display:none"><span class="nav-icon">🔗</span><span>This Station</span></div>
     <div class="nav-section-label">Filter by Job</div>
     <div id="gallery-filter-wrap">
       <input type="text" id="job-search-input" placeholder="Search jobs…" autocomplete="off"
@@ -55,10 +57,30 @@
   <main id="main">
     <div id="main-content">
 
+      <!-- Lost connection to the primary station (secondary only) -->
+      <div id="station-reconnect-banner" style="display:none;margin:12px 20px 0;padding:12px 16px;background:rgba(234,179,8,.1);border:1px solid rgba(234,179,8,.3);border-radius:8px;align-items:center;gap:10px;font-size:12px;color:var(--amber)">
+        <span style="font-size:18px">⚠</span>
+        <span id="station-reconnect-text">Lost connection — reconnecting…</span>
+      </div>
+
       <!-- Hot folder warning banner -->
       <div id="hot-folder-warning" style="display:none;margin:12px 20px 0;padding:12px 16px;background:rgba(240,82,82,.1);border:1px solid rgba(240,82,82,.3);border-radius:8px;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--red)">
         <span style="font-size:18px">⚠️</span>
         <span><strong>No hot folder configured.</strong> Images cannot be downloaded or printed until you set an Image Output folder in <a href="#" onclick="showPanel('settings',document.querySelector('.nav-item[onclick*=settings]'));return false;" style="color:var(--red);text-decoration:underline">Settings</a>.</span>
+      </div>
+
+      <!-- This Station (secondary-only: a labeled window into the primary, not a live queue of its own) -->
+      <div id="panel-station" class="panel">
+        <div class="panel-header"><h1 class="panel-title">This Station</h1></div>
+        <div class="settings-section" style="max-width:520px">
+          <div id="station-connected-info" style="margin-bottom:14px"></div>
+          <button class="btn-primary" id="btn-open-primary-queue" onclick="openPrimaryQueue()" style="margin-bottom:18px">Open Queue →</button>
+          <div class="form-hint" style="margin-bottom:10px">This station has no live queue of its own — it's connected to the main station above. Manage this station:</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-secondary" onclick="promoteThisStation()">🔷 Make this the Main Station</button>
+            <button class="btn-secondary" onclick="resetStationToSolo()">Disconnect / run standalone</button>
+          </div>
+        </div>
       </div>
 
       <!-- Queue -->
@@ -149,6 +171,11 @@
           <button class="sv-toggle-btn" data-view="in_studio" onclick="setSettingsView('in_studio')">In-Studio</button>
           <button class="sv-toggle-btn" data-view="both" onclick="setSettingsView('both')">Both</button>
         </div>
+        <div class="settings-section" id="settings-onsite-only-lan-share">
+          <div class="settings-section-title">Multi-Station Setup</div>
+          <div id="multistation-content"><!-- rendered by renderMultiStationSettings() --></div>
+        </div>
+
         <div class="settings-section">
           <div class="settings-section-title">PDX Credentials</div>
           <div class="form-row">
@@ -253,6 +280,30 @@
           </div>
         </div>
 
+        <div class="settings-section" id="settings-in-studio-only-shipping">
+          <div class="settings-section-title">Shipping Providers</div>
+
+          <div class="form-row" id="shipping-collapsed-prompt">
+            <div class="form-hint">
+              Want Onsite to automatically tell PDX when a non-pickup order ships? Connect a shipping-label provider (e.g. ShipStation) to report the real carrier and tracking number — this is optional and off until you set it up.
+            </div>
+            <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <select class="form-select" id="new-provider-type" style="width:auto;font-size:11px;padding:3px 8px"></select>
+              <button class="btn-secondary" onclick="addShippingProvider()">+ Set up shipping</button>
+            </div>
+          </div>
+
+          <div id="shipping-advanced-wrap" style="display:none">
+            <div class="form-hint" style="margin-bottom:12px">Automatically tells PDX when a non-pickup order ships, using a real carrier and tracking number. This is an addition to, not a replacement for, the Mark Shipped button on an order — it's the fallback for anything a provider doesn't report.</div>
+            <div class="form-row">
+              <label class="form-label">Default Package Weight (lb)</label>
+              <input class="form-input" id="s-default-package-weight" type="number" step="0.1" min="0.1" style="width:100px">
+              <div class="form-hint">Pre-fills the weight shown on Ready to Ship — most orders are just prints. Staff can change it per-shipment before buying the label.</div>
+            </div>
+            <div id="shipping-providers-list"></div>
+          </div>
+        </div>
+
         <div class="settings-section">
           <div class="settings-section-title">Print Mode</div>
           <div class="form-row">
@@ -283,7 +334,7 @@
             </select>
           </div>
         </div>
-        <div class="settings-section">
+        <div class="settings-section" id="settings-onsite-only-receipt-printer">
           <div class="settings-section-title">Printer</div>
           <div class="form-row-inline">
             <div class="form-row" style="flex:1"><label class="form-label">Printer Name</label><select class="form-select" id="s-printer-name"><option value="">Loading…</option></select></div>
@@ -353,6 +404,17 @@
     <button class="btn-action btn-fulfill" id="btn-detail-print-slip" onclick="detailPrintSlip()" style="display:none">🖨 Print Slip</button>
     <button class="btn-action btn-reprint-img" id="btn-detail-mark-slip" onclick="detailMarkSlipPrinted()" style="display:none">✓ Mark Printed</button>
     <button class="btn-action btn-confirm" id="btn-detail-confirm" onclick="detailConfirmPickup()">✅ Confirm Pickup</button>
+    <button class="btn-action btn-confirm" id="btn-detail-ready-to-ship" onclick="showReadyToShipForm()" style="display:none">🚀 Ready to Ship</button>
+    <div id="detail-ready-to-ship-form" style="display:none">
+      <label class="form-label" for="ready-to-ship-weight">Package Weight (lb)</label>
+      <input class="form-input" id="ready-to-ship-weight" type="number" step="0.1" min="0.1" style="width:100%;margin-bottom:8px;box-sizing:border-box">
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <button class="btn-action btn-confirm" style="flex:1;margin:0" onclick="detailReadyToShip()">🚀 Buy Label</button>
+        <button class="btn-action btn-reprint-img" style="flex:1;margin:0" onclick="hideReadyToShipForm()">Cancel</button>
+      </div>
+      <button class="btn-action btn-reprint-img" id="btn-ready-to-ship-test" style="margin:0;width:100%" onclick="detailTestLabel()">🧪 Test Label (void, not reported to PDX)</button>
+    </div>
+    <button class="btn-action btn-fulfill" id="btn-detail-print-label" onclick="detailPrintLabel()" style="display:none">🖨 Print Label</button>
     <button class="btn-action btn-fulfill" id="btn-detail-mark-shipped" onclick="showShipForm()" style="display:none">📦 Mark Shipped</button>
     <div id="detail-ship-form" style="display:none">
       <select class="form-select" id="ship-carrier" style="width:100%;margin-bottom:6px">

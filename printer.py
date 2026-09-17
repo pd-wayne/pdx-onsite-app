@@ -941,6 +941,10 @@ def build_packing_slip_pages(order: dict, destinations: list, studio_name: str =
     shipping    = raw.get("shipping", {}) or {}
     destination = shipping.get("destination", {}) or {}
     address_lines = []
+    if destination.get("address1"):
+        address_lines.append(destination["address1"])
+    if destination.get("address2"):
+        address_lines.append(destination["address2"])
     city_line = ", ".join(p for p in [destination.get("city", ""), destination.get("state", "")] if p)
     if city_line or destination.get("zipCode"):
         address_lines.append(f"{city_line} {destination.get('zipCode', '')}".strip())

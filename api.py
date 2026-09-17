@@ -141,6 +141,19 @@ def shipped_callback(lab_id: str, api_key: str, order_num: str,
         return False, str(e)
 
 
+def is_already_shipped_error(error_text: str) -> bool:
+    """PDX refuses to re-fulfill an order that's already been marked shipped —
+    that's actually the safety net that makes automated shipping pollers safe
+    to retry. Recognize that specific rejection as a terminal SUCCESS (mark it
+    done locally, stop retrying) rather than a generic failure that would keep
+    hammering PDX every poll cycle forever. Best-effort keyword match — tighten
+    this once we've seen a real rejection's exact wording."""
+    if not error_text:
+        return False
+    text = error_text.lower()
+    return "already" in text and any(w in text for w in ("shipped", "fulfilled", "processed"))
+
+
 def test_connection(lab_id: str, api_key: str, environment: str = None) -> tuple[bool, str]:
     orders, err = poll_orders(lab_id, api_key, environment=environment)
     if err:

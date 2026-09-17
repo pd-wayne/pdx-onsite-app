@@ -387,3 +387,56 @@ class TestCheckPendingPrints:
         p._check_pending_prints()  # should not raise
 
         assert db.get_order_items(pickup_order["num"])[0]["status"] == "queued"
+
+
+# ── Ingestion-time shipping-provider order creation ──────────────────────────
+# Best-effort: creates the order in a configured shipping provider so "Ready to
+# Ship" only has to create the label later. Must never block or fail ingestion.
+
+class TestCreateShippingOrder:
+    def test_noop_when_no_provider_configured(self, monkeypatch):
+        import shipping_providers as sp
+        calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: (calls.append(1), ("x", ""))[1])
+        p = poller_module.Poller()
+        p._create_shipping_order("ORD001", ECONOMY)
+        assert calls == []
+
+    def test_creates_order_and_stores_linkage(self, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_order(ECONOMY)
+        pid = db.upsert_shipping_provider("shipstation", "SS", {"api_key": "k", "api_secret": "s"})
+        captured = {}
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order",
+                           lambda self, order: (captured.update(order), ("555", ""))[1])
+
+        p = poller_module.Poller()
+        p._create_shipping_order("T-002", ECONOMY)
+
+        order = db.get_order("T-002")
+        assert order["ship_provider_id"] == pid
+        assert order["ship_external_order_id"] == "555"
+        assert captured["order_num"] == "T-002"
+        assert captured["destination"]["recipient"] == "Bob"
+
+    def test_adapter_failure_does_not_raise_or_store_linkage(self, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_order(ECONOMY)
+        db.upsert_shipping_provider("shipstation", "SS", {"api_key": "k", "api_secret": "s"})
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: (None, "boom"))
+
+        p = poller_module.Poller()
+        p._create_shipping_order("T-002", ECONOMY)  # should not raise
+
+        order = db.get_order("T-002")
+        assert order["ship_provider_id"] is None
+
+    def test_unexpected_exception_does_not_propagate(self, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_shipping_provider("shipstation", "SS", {"api_key": "k", "api_secret": "s"})
+        def raise_error(self, order):
+            raise RuntimeError("network exploded")
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", raise_error)
+
+        p = poller_module.Poller()
+        p._create_shipping_order("T-999", ECONOMY)  # should not raise

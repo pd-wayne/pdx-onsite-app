@@ -27,6 +27,9 @@ DEFAULTS = {
     "samples_folder": "",
     "print_mode": "auto",           # "auto" | "manual"
     "destination_health_threshold": 10,  # minutes before a destination is flagged stale
+    "station_role": "solo",         # "solo" | "primary" | "secondary" — see discovery.py
+    "station_name": "",
+    "joined_primary_url": "",       # secondary only — last-known address of the primary it joined
     "api_environment": "production",  # "production" | "staging" — see api.py get_base_url()
     # Each environment keeps its own saved credentials — lab_id/api_key above
     # are always "whichever environment is currently active" (what the
@@ -36,6 +39,7 @@ DEFAULTS = {
     "production_api_key": "",
     "staging_lab_id": "",
     "staging_api_key": "",
+    "default_package_weight_lb": 0.1,  # most orders are prints — staff can override per-shipment at Ready to Ship
 }
 
 
@@ -62,8 +66,16 @@ def load() -> dict:
 
 
 def save(data: dict) -> bool:
+    """Merges `data` onto the CURRENTLY SAVED config, not onto bare DEFAULTS —
+    a partial dict (anything not touching every key) must never silently
+    reset the fields it didn't mention. This used to merge onto DEFAULTS
+    instead, on the assumption every caller always submits the full settings
+    object; the multi-station feature broke that assumption (a plain
+    Settings-page Save doesn't know about station_role/station_name/
+    joined_primary_url, so it was wiping them back to "solo" every time) —
+    found by code review, not by a caller actually hitting it in the wild."""
     try:
-        cfg = {**DEFAULTS, **data}
+        cfg = {**load(), **data}
         with open(CONFIG_PATH, "w") as f:
             json.dump(cfg, f, indent=2)
         return True
