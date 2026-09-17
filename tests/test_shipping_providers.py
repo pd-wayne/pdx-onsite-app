@@ -171,6 +171,24 @@ class TestShipStationV1CreateLabel:
         assert result is None
         assert "500" in err
 
+    def test_validation_error_surfaces_exception_message_not_raw_json(self, monkeypatch):
+        """Real response body seen from ShipStation V1 when a service that
+        requires a package type (e.g. stamps_com/usps_priority_mail) doesn't get
+        one — verified against the live API. Staff should see the plain message,
+        not the raw JSON/stack trace envelope."""
+        real_error_body = {
+            "Message": "An error has occurred.",
+            "ExceptionMessage": "No package type has been selected.",
+            "ExceptionType": "SS.Core.Objects.Exceptions.OrderValidationException",
+            "StackTrace": "   at SS.Core.Objects.Shipments.<>c__DisplayClass83_1.<CreateLabel>b__0(ValidationMessage message)",
+        }
+        monkeypatch.setattr(requests, "post",
+                           lambda *a, **k: _FakeResponse(real_error_body, ok=False, status_code=500, text=str(real_error_body)))
+        adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
+        result, err = adapter.create_label("555", "stamps_com", "usps_priority_mail", "", "none", "2026-07-28", 0.1)
+        assert result is None
+        assert err == "ShipStation error: No package type has been selected."
+
 
 class TestShipStationV1Discovery:
     def test_list_carriers(self, monkeypatch):

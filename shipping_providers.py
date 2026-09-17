@@ -67,6 +67,20 @@ class ShipStationV1Adapter(ShippingProviderAdapter):
     def _auth(self):
         return (self.credentials.get("api_key", ""), self.credentials.get("api_secret", ""))
 
+    def _format_error(self, resp) -> str:
+        """ShipStation V1 wraps validation failures (bad weight, missing package
+        type, bad address, etc.) in a JSON body with an ExceptionMessage — surface
+        that directly instead of the raw HTTP status + JSON blob, so staff (and
+        Settings error toasts) see something actionable."""
+        try:
+            body = resp.json()
+            msg = body.get("ExceptionMessage") or body.get("Message")
+            if msg:
+                return f"ShipStation error: {msg}"
+        except Exception:
+            pass
+        return f"HTTP {resp.status_code}: {resp.text[:300]}"
+
     def _get(self, path: str, params: dict):
         api_key, api_secret = self._auth()
         if not api_key or not api_secret:
@@ -80,7 +94,7 @@ class ShipStationV1Adapter(ShippingProviderAdapter):
         except Exception as e:
             return None, str(e)
         if not resp.ok:
-            return None, f"HTTP {resp.status_code}: {resp.text[:300]}"
+            return None, self._format_error(resp)
         return resp.json(), ""
 
     def _post(self, path: str, body: dict):
@@ -96,7 +110,7 @@ class ShipStationV1Adapter(ShippingProviderAdapter):
         except Exception as e:
             return None, str(e)
         if not resp.ok:
-            return None, f"HTTP {resp.status_code}: {resp.text[:300]}"
+            return None, self._format_error(resp)
         return resp.json(), ""
 
     def create_order(self, order: dict) -> tuple:
