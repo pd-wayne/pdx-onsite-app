@@ -33,7 +33,7 @@ class ShippingProviderAdapter:
 
     def create_label(self, external_order_id: str, carrier_code: str, service_code: str,
                      package_code: str, confirmation: str, ship_date: str,
-                     test_label: bool = False) -> tuple:
+                     weight_lb: float, test_label: bool = False) -> tuple:
         """Returns (result, error). result: {tracking_number, shipment_cost, label_data}."""
         raise NotImplementedError
 
@@ -129,7 +129,7 @@ class ShipStationV1Adapter(ShippingProviderAdapter):
 
     def create_label(self, external_order_id: str, carrier_code: str, service_code: str,
                      package_code: str, confirmation: str, ship_date: str,
-                     test_label: bool = False) -> tuple:
+                     weight_lb: float, test_label: bool = False) -> tuple:
         body = {
             "orderId": int(external_order_id),
             "carrierCode": carrier_code,
@@ -137,6 +137,7 @@ class ShipStationV1Adapter(ShippingProviderAdapter):
             "confirmation": confirmation or "none",
             "shipDate": ship_date,
             "testLabel": test_label,
+            "weight": {"value": weight_lb, "units": "pounds"},
         }
         if package_code:
             body["packageCode"] = package_code

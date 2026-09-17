@@ -39,6 +39,7 @@ DEFAULTS = {
     "production_api_key": "",
     "staging_lab_id": "",
     "staging_api_key": "",
+    "default_package_weight_lb": 0.1,  # most orders are prints — staff can override per-shipment at Ready to Ship
 }
 
 

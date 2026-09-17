@@ -653,6 +653,13 @@ def create_app(poller, ui_path: str = "") -> Flask:
         anything changes locally."""
         data = request.get_json() or {}
         order_num = data.get("order_num", "")
+        cfg = config.load()
+        try:
+            weight_lb = float(data.get("weight_lb", cfg.get("default_package_weight_lb", 0.1)))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Invalid weight"})
+        if weight_lb <= 0:
+            return jsonify({"ok": False, "error": "Weight must be greater than 0"})
         # Locked end-to-end: without this, two near-simultaneous requests for
         # the same order (multi-station, or a double-click) could both pass
         # the has_shipped_notification check below before either records it,
@@ -694,7 +701,6 @@ def create_app(poller, ui_path: str = "") -> Flask:
             except ValueError as e:
                 return jsonify({"ok": False, "error": str(e)})
 
-            cfg = config.load()
             external_order_id = order.get("ship_external_order_id")
             if not external_order_id:
                 # Order-creation at ingestion didn't happen (provider added after
@@ -713,6 +719,7 @@ def create_app(poller, ui_path: str = "") -> Flask:
             result, err = adapter.create_label(
                 external_order_id, mapping["carrier_code"], mapping["service_code"],
                 mapping.get("package_code", ""), mapping.get("confirmation", "none"), ship_date,
+                weight_lb,
             )
             if err:
                 _log(f"Ready to Ship failed for {order_num}: {err}", "error")

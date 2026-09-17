@@ -1074,6 +1074,57 @@ class TestMarkReadyToShip:
         assert db.has_shipped_notification("ORD001") is True
         assert db.get_order("ORD001")["status"] == "fulfilled"
 
+    def test_uses_default_weight_when_none_provided(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        import config
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        captured = {}
+        def fake_create_label(self, external_order_id, carrier_code, service_code, package_code,
+                              confirmation, ship_date, weight_lb, test_label=False):
+            captured["weight_lb"] = weight_lb
+            return {"tracking_number": "9400123"}, ""
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", fake_create_label)
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert captured["weight_lb"] == config.load()["default_package_weight_lb"]
+
+    def test_staff_supplied_weight_overrides_default(self, client, monkeypatch):
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("555", ""))
+        captured = {}
+        def fake_create_label(self, external_order_id, carrier_code, service_code, package_code,
+                              confirmation, ship_date, weight_lb, test_label=False):
+            captured["weight_lb"] = weight_lb
+            return {"tracking_number": "9400123"}, ""
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", fake_create_label)
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        resp = client.post("/api/mark_ready_to_ship",
+                           data=json.dumps({"order_num": "ORD001", "weight_lb": 2.5}), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert captured["weight_lb"] == 2.5
+
+    def test_rejects_zero_or_negative_weight_before_buying_a_label(self, client, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        create_label_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: (create_label_calls.append(1), ({"tracking_number": "X"}, ""))[1])
+
+        resp = client.post("/api/mark_ready_to_ship",
+                           data=json.dumps({"order_num": "ORD001", "weight_lb": 0}), content_type="application/json")
+        assert resp.get_json()["ok"] is False
+        assert not create_label_calls
+
     def test_reuses_existing_provider_order_id_without_recreating(self, client, monkeypatch):
         import shipping_providers as sp
         import api as pdx_api

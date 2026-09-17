@@ -107,7 +107,7 @@ class TestShipStationV1CreateOrder:
 class TestShipStationV1CreateLabel:
     def test_missing_credentials_returns_error(self):
         adapter = sp.ShipStationV1Adapter({})
-        result, err = adapter.create_label("555", "ups", "ups_ground", "package", "none", "2026-07-28")
+        result, err = adapter.create_label("555", "ups", "ups_ground", "package", "none", "2026-07-28", 0.1)
         assert result is None
         assert "required" in err.lower()
 
@@ -119,7 +119,7 @@ class TestShipStationV1CreateLabel:
             return _FakeResponse({"trackingNumber": "1Z999", "shipmentCost": 8.5, "labelData": "base64=="})
         monkeypatch.setattr(requests, "post", fake_post)
 
-        result, err = adapter.create_label("555", "ups", "ups_ground", "", "none", "2026-07-28")
+        result, err = adapter.create_label("555", "ups", "ups_ground", "", "none", "2026-07-28", 0.1)
         assert err == ""
         assert result["tracking_number"] == "1Z999"
         assert captured["orderId"] == 555
@@ -128,6 +128,7 @@ class TestShipStationV1CreateLabel:
         assert captured["confirmation"] == "none"
         assert captured["shipDate"] == "2026-07-28"
         assert captured["testLabel"] is False
+        assert captured["weight"] == {"value": 0.1, "units": "pounds"}
         assert "packageCode" not in captured
 
     def test_includes_package_code_when_provided(self, monkeypatch):
@@ -138,7 +139,7 @@ class TestShipStationV1CreateLabel:
             return _FakeResponse({"trackingNumber": "1Z999"})
         monkeypatch.setattr(requests, "post", fake_post)
 
-        adapter.create_label("555", "stamps_com", "usps_priority_mail", "large_flat_rate_box", "none", "2026-07-28")
+        adapter.create_label("555", "stamps_com", "usps_priority_mail", "large_flat_rate_box", "none", "2026-07-28", 0.1)
         assert captured["packageCode"] == "large_flat_rate_box"
 
     def test_test_label_flag_passed_through(self, monkeypatch):
@@ -149,13 +150,24 @@ class TestShipStationV1CreateLabel:
             return _FakeResponse({"trackingNumber": "TEST123"})
         monkeypatch.setattr(requests, "post", fake_post)
 
-        adapter.create_label("555", "stamps_com", "usps_priority_mail", "", "none", "2026-07-28", test_label=True)
+        adapter.create_label("555", "stamps_com", "usps_priority_mail", "", "none", "2026-07-28", 0.1, test_label=True)
         assert captured["testLabel"] is True
+
+    def test_weight_reflects_requested_value(self, monkeypatch):
+        adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
+        captured = {}
+        def fake_post(url, auth, json, timeout):
+            captured.update(json)
+            return _FakeResponse({"trackingNumber": "1Z999"})
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        adapter.create_label("555", "ups", "ups_ground", "", "none", "2026-07-28", 2.5)
+        assert captured["weight"] == {"value": 2.5, "units": "pounds"}
 
     def test_http_error_returns_message(self, monkeypatch):
         adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
         monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse({}, ok=False, status_code=500, text="Server error"))
-        result, err = adapter.create_label("555", "ups", "ups_ground", "", "none", "2026-07-28")
+        result, err = adapter.create_label("555", "ups", "ups_ground", "", "none", "2026-07-28", 0.1)
         assert result is None
         assert "500" in err
 

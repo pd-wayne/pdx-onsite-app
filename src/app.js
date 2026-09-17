@@ -542,6 +542,8 @@ async function openDetail(orderNum) {
     btnMarkShipped.textContent = isConfirmed ? "📦 Shipped" : "📦 Mark Shipped";
   }
   hideShipForm();
+  const readyToShipForm = document.getElementById("detail-ready-to-ship-form");
+  if (readyToShipForm) readyToShipForm.style.display = "none";
 
   // Print Slip / Mark Printed only apply to in-studio orders, and stay clickable
   // even after being done so staff can reprint/re-mark if something goes wrong.
@@ -702,6 +704,19 @@ function hideShipForm() {
   document.getElementById("ship-tracking").value = "";
 }
 
+function showReadyToShipForm() {
+  document.getElementById("btn-detail-ready-to-ship").style.display = "none";
+  document.getElementById("ready-to-ship-weight").value = state.default_package_weight_lb || 0.1;
+  document.getElementById("detail-ready-to-ship-form").style.display = "block";
+}
+
+function hideReadyToShipForm() {
+  const form = document.getElementById("detail-ready-to-ship-form");
+  if (form) form.style.display = "none";
+  const btn = document.getElementById("btn-detail-ready-to-ship");
+  if (btn) btn.style.display = "";
+}
+
 async function detailMarkShipped() {
   if (!state.selectedOrder) return;
   const carrier = document.getElementById("ship-carrier").value;
@@ -720,16 +735,20 @@ async function detailMarkShipped() {
 
 async function detailReadyToShip() {
   if (!state.selectedOrder) return;
-  const btn = document.getElementById("btn-detail-ready-to-ship");
   const orderNum = state.selectedOrder.order_num;
-  btn.disabled = true; btn.textContent = "⏳ Creating label…";
-  const result = await apiPost("mark_ready_to_ship", { order_num: orderNum });
+  const weightInput = document.getElementById("ready-to-ship-weight");
+  const weightLb = parseFloat(weightInput.value);
+  if (!(weightLb > 0)) { toast("Enter a package weight greater than 0", "error"); return; }
+  const buyBtn = document.querySelector("#detail-ready-to-ship-form .btn-confirm");
+  buyBtn.disabled = true; buyBtn.textContent = "⏳ Creating label…";
+  const result = await apiPost("mark_ready_to_ship", { order_num: orderNum, weight_lb: weightLb });
   if (result.ok) {
     toast(`🚀 Shipped: ${orderNum} (${result.carrier} ${result.tracking_number})`, "success");
+    hideReadyToShipForm();
     await openDetail(orderNum);
   } else {
     toast(`Ready to Ship failed: ${result.error} — use Mark Shipped instead`, "error");
-    btn.disabled = false; btn.textContent = "🚀 Ready to Ship";
+    buyBtn.disabled = false; buyBtn.textContent = "🚀 Buy Label";
   }
 }
 
@@ -1122,6 +1141,8 @@ async function loadSettings() {
     document.getElementById("s-poll-interval").value = String(cfg.poll_interval || 60);
     document.getElementById("s-unclaimed-threshold").value = String(cfg.unclaimed_threshold || 30);
     document.getElementById("s-destination-health-threshold").value = String(cfg.destination_health_threshold || 10);
+    document.getElementById("s-default-package-weight").value = cfg.default_package_weight_lb ?? 0.1;
+    state.default_package_weight_lb = parseFloat(cfg.default_package_weight_lb) || 0.1;
     document.getElementById("s-image-folder").value = cfg.image_output_folder || "";
     document.getElementById("s-samples-folder").value = cfg.samples_folder || "";
     state.unclaimed_threshold = parseInt(cfg.unclaimed_threshold) || 30;
@@ -1411,6 +1432,7 @@ async function saveSettings() {
     poll_interval:        parseInt(document.getElementById("s-poll-interval").value),
     unclaimed_threshold:  parseInt(document.getElementById("s-unclaimed-threshold").value),
     destination_health_threshold: parseInt(document.getElementById("s-destination-health-threshold").value),
+    default_package_weight_lb: parseFloat(document.getElementById("s-default-package-weight").value) || 0.1,
     printer_name:         printerManual || printerSel,
     print_mode:           document.getElementById("s-print-mode").value,
     image_output_folder:  document.getElementById("s-image-folder").value.trim(),
@@ -1421,6 +1443,7 @@ async function saveSettings() {
   if (result.ok) {
     state.unclaimed_threshold = cfg.unclaimed_threshold;
     state.destination_health_threshold = cfg.destination_health_threshold;
+    state.default_package_weight_lb = cfg.default_package_weight_lb;
     if (cfg.samples_folder) state.samplesFolder = cfg.samples_folder;
     updateHotFolderWarning(cfg.image_output_folder);
     const printerDisplayName = document.getElementById("s-printer-display-name").value.trim();
@@ -2230,6 +2253,7 @@ async function init() {
     }
     updateHotFolderWarning(cfg.image_output_folder);
     state.destination_health_threshold = parseInt(cfg.destination_health_threshold) || 10;
+    state.default_package_weight_lb = parseFloat(cfg.default_package_weight_lb) || 0.1;
     if (cfg.logo_path) loadLogoPreview();
   } catch(e) {}
   try {
