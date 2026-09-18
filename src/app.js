@@ -2072,13 +2072,31 @@ async function renderShippingProviders() {
   await Promise.all(providers.map(p => loadShippingOptionMappings(p.id)));
 }
 
+// Shows a non-secret credential (e.g. API Key) as first4••••last4 instead of
+// plaintext, so staff can visually confirm which key is connected without
+// it being fully exposed on-screen. The real value is kept in a data
+// attribute and swapped back in on save if the visible text is untouched —
+// see saveShippingProviderRow.
+function maskCredential(value) {
+  if (!value) return "";
+  if (value.length <= 8) return "•".repeat(value.length);
+  return value.slice(0, 4) + "•".repeat(Math.max(4, value.length - 8)) + value.slice(-4);
+}
+
 function renderProviderCard(p) {
   const catalogEntry = _catalogFor(p.provider_type) || { credential_fields: [] };
-  const credsHtml = catalogEntry.credential_fields.map(f => `
-    <input class="form-input" type="${f.secret ? "password" : "text"}"
-           id="ship-cred-${p.id}-${esc(f.key)}" placeholder="${esc(f.label)}"
-           value="${esc(p.credentials?.[f.key] || "")}">
-  `).join("");
+  const credsHtml = catalogEntry.credential_fields.map(f => {
+    const realValue = p.credentials?.[f.key] || "";
+    if (f.secret || !realValue) {
+      return `<input class="form-input" type="${f.secret ? "password" : "text"}"
+                     id="ship-cred-${p.id}-${esc(f.key)}" placeholder="${esc(f.label)}"
+                     value="${esc(realValue)}">`;
+    }
+    const masked = maskCredential(realValue);
+    return `<input class="form-input" type="text"
+                   id="ship-cred-${p.id}-${esc(f.key)}" placeholder="${esc(f.label)}"
+                   value="${esc(masked)}" data-real-value="${esc(realValue)}" data-masked-value="${esc(masked)}">`;
+  }).join("");
 
   return `
   <div class="ship-provider-card" id="ship-provider-${p.id}">
@@ -2106,7 +2124,12 @@ async function saveShippingProviderRow(id) {
   const catalogEntry = _catalogFor(provider.provider_type) || { credential_fields: [] };
   const credentials = {};
   catalogEntry.credential_fields.forEach(f => {
-    credentials[f.key] = document.getElementById(`ship-cred-${id}-${f.key}`)?.value.trim() || "";
+    const el = document.getElementById(`ship-cred-${id}-${f.key}`);
+    const val = el?.value.trim() || "";
+    // Masked non-secret fields (e.g. API Key) display first4••••last4, not
+    // the real value — if untouched, save the real value back, not the mask.
+    credentials[f.key] = (el?.dataset.maskedValue && val === el.dataset.maskedValue)
+      ? el.dataset.realValue : val;
   });
   const result = await apiPost("save_shipping_provider", {
     id,
@@ -2183,7 +2206,7 @@ async function loadShippingOptionMappings(providerId) {
       <div></div>
     </div>`;
 
-  wrap.innerHTML = header + options.map((opt, i) => {
+  wrap.innerHTML = `<div class="ship-option-table">` + header + options.map((opt, i) => {
     const m = byOption[opt.external_id] || {};
     const rowId = `${providerId}-${i}`;
     return `
@@ -2204,7 +2227,7 @@ async function loadShippingOptionMappings(providerId) {
       </select>
       <button class="btn-xs btn-xs-blue" onclick="saveShippingOptionMappingRow('${rowId}')">Save</button>
     </div>`;
-  }).join("");
+  }).join("") + `</div>`;
 
   // Pre-populate service/package dropdowns for rows that already have a carrier chosen.
   options.forEach((opt, i) => {

@@ -823,7 +823,16 @@ class TestShippingOptionMappings:
                          "shipping": {"option": {"externalId": "pdx_pickup", "name": "Pickup"},
                                       "destination": {"recipient": "C"}}})
         options = {o["external_id"]: o["name"] for o in db.get_known_pdx_shipping_options()}
-        assert options == {"pdx_economy": "Economy", "pdx_pickup": "Pickup"}
+        assert options == {"pdx_economy": "Economy"}
+
+    def test_get_known_pdx_shipping_options_excludes_pickup(self, fresh_db):
+        """Pickup orders never go through Ready to Ship / Mark Shipped, so
+        pdx_pickup should never be offered as something to map."""
+        db.upsert_order({"num": "ORD001", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "pdx_pickup", "name": "Pickup"},
+                                      "destination": {"recipient": "C"}}})
+        assert db.get_known_pdx_shipping_options() == []
 
     def test_get_known_pdx_shipping_options_empty_when_no_orders(self, fresh_db):
         assert db.get_known_pdx_shipping_options() == []

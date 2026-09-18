@@ -990,7 +990,10 @@ def get_known_pdx_shipping_options() -> list:
             continue
         option = (raw.get("shipping") or {}).get("option") or {}
         external_id = option.get("externalId", "")
-        if external_id and external_id not in seen:
+        # Pickup orders never go through Ready to Ship / Mark Shipped (see
+        # isPickupOrder gating in app.js) — no shipping-provider mapping is
+        # ever needed or consulted for them, so don't offer one to configure.
+        if external_id and external_id != "pdx_pickup" and external_id not in seen:
             seen[external_id] = option.get("name", "")
     return [{"external_id": k, "name": v} for k, v in seen.items()]
 
