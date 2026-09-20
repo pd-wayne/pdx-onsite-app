@@ -235,6 +235,43 @@ class TestDropshipImageDownload:
         assert results == [("DS002", True, "")]
 
 
+class TestPrintReceipt:
+    """_print_receipt reads back the just-upserted DB row instead of rebuilding
+    a parallel dict from the raw poll payload — this is also exactly what a
+    later Reprint Receipt reads, so the two can never drift on which fields
+    they include. Regression coverage for a real bug: customer_phone used to
+    only exist in the rebuilt dict, never in the DB row, so a reprint always
+    printed a blank phone number."""
+
+    def test_passes_customer_phone_through_to_printer(self, monkeypatch, pickup_order):
+        db.upsert_order(pickup_order)
+        monkeypatch.setattr(config, "load", lambda: {"printer_name": "Printer 1"})
+        captured = {}
+        monkeypatch.setattr(printer, "print_receipt",
+                           lambda order, *a, **k: (captured.update(order), (True, ""))[1])
+
+        poller_module.Poller()._print_receipt(pickup_order["num"])
+        assert captured["customer_phone"] == "+12819749028"
+        assert captured["customer_name"] == "ZaTavia Taylor"
+
+    def test_skips_when_no_printer_configured(self, monkeypatch, pickup_order):
+        db.upsert_order(pickup_order)
+        monkeypatch.setattr(config, "load", lambda: {"printer_name": ""})
+        calls = []
+        monkeypatch.setattr(printer, "print_receipt", lambda *a, **k: calls.append(1))
+
+        poller_module.Poller()._print_receipt(pickup_order["num"])
+        assert not calls
+
+    def test_skips_gracefully_for_unknown_order(self, monkeypatch):
+        monkeypatch.setattr(config, "load", lambda: {"printer_name": "Printer 1"})
+        calls = []
+        monkeypatch.setattr(printer, "print_receipt", lambda *a, **k: calls.append(1))
+
+        poller_module.Poller()._print_receipt("NOPE")  # must not raise
+        assert not calls
+
+
 # ── In-studio routing (Phase 6) ───────────────────────────────────────────────
 # In-studio pickup orders now get the exact same hot-folder/product-routing
 # treatment onsite orders do — the only thing that stays onsite-only is the

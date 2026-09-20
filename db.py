@@ -169,6 +169,7 @@ def init_db():
             ("ship_provider_id",      "INTEGER"),
             ("ship_external_order_id", "TEXT"),
             ("ship_label_data",       "TEXT"),
+            ("customer_phone",       "TEXT"),
         ])
         _migrate_columns(conn, "jobs", [
             ("fulfillment_mode", "TEXT NOT NULL DEFAULT 'onsite'"),
@@ -220,6 +221,7 @@ def upsert_order(order_data: dict) -> bool:
     shipping    = order_data.get("shipping", {})
     destination = shipping.get("destination", {})
     customer_name = destination.get("recipient", "Unknown")
+    customer_phone = destination.get("phone", "")
     gallery   = order_data.get("gallery", "")
     placed_at = order_data.get("placedAt", "")
 
@@ -276,12 +278,12 @@ def upsert_order(order_data: dict) -> bool:
 
         conn.execute("""
             INSERT INTO orders
-                (order_num, customer_name, gallery, items_json, images_json,
+                (order_num, customer_name, customer_phone, gallery, items_json, images_json,
                  placed_at, received_at, status, download_status, fulfill_status,
                  fulfillment_mode, is_bulk, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'unfulfilled', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'unfulfilled', ?, ?, ?)
         """, (
-            order_num, customer_name, gallery,
+            order_num, customer_name, customer_phone, gallery,
             json.dumps(items_summary), json.dumps(images),
             placed_at, datetime.now().isoformat(), db_status,
             fulfillment_mode, is_bulk, json.dumps(order_data)

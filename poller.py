@@ -1,7 +1,6 @@
 """
 poller.py — Background polling thread for PDX Onsite
 """
-import json
 import threading
 import time
 import logging
@@ -150,7 +149,7 @@ class Poller:
                 # In-studio orders get a packing slip instead, printed on staff action
                 # (see server.py: /api/print_packing_slip, /api/mark_slip_printed).
                 if job_mode == "onsite":
-                    self._print_receipt(order_num, order_data)
+                    self._print_receipt(order_num)
 
                 # Routing/download runs for BOTH onsite and in_studio pickup orders —
                 # same hot-folder/product-routing engine either way. In manual mode
@@ -196,7 +195,7 @@ class Poller:
         if new_count > 0 and self.on_new_orders:
             self.on_new_orders(new_count)
 
-    def _print_receipt(self, order_num: str, order_data: dict):
+    def _print_receipt(self, order_num: str):
         cfg = config.load()
         printer_name = cfg.get("printer_name", "")
         studio_name  = cfg.get("studio_name", "")
@@ -206,25 +205,14 @@ class Poller:
             log.warning(f"[Poller] No printer configured — skipping receipt for {order_num}")
             return
 
-        shipping    = order_data.get("shipping", {})
-        destination = shipping.get("destination", {})
-
-        stored = db.get_conn().execute(
-            "SELECT items_json, images_json, received_at FROM orders WHERE order_num=?", (order_num,)
-        ).fetchone()
-        items_summary  = json.loads(stored["items_json"]) if stored and stored["items_json"] else []
-        images_summary = stored["images_json"] if stored else "[]"
-
-        order_dict = {
-            "order_num":      order_num,
-            "customer_name":  destination.get("recipient", "Unknown"),
-            "customer_phone": destination.get("phone", ""),
-            "gallery":        order_data.get("gallery", ""),
-            "placed_at":      order_data.get("placedAt", ""),
-            "received_at":    stored["received_at"] if stored else datetime.now().isoformat(),
-            "items_json":     json.dumps(items_summary),
-            "images_json":    images_summary,
-        }
+        # Read back the just-upserted row rather than rebuilding a parallel dict
+        # from the raw poll payload — this is also exactly what a later Reprint
+        # Receipt reads, so the two can never drift out of sync on which fields
+        # they include (a customer_phone gap here was found and fixed this way).
+        order_dict = db.get_order(order_num)
+        if not order_dict:
+            log.warning(f"[Poller] Could not load {order_num} for receipt — skipping")
+            return
 
         try:
             ok, err = printer.print_receipt(order_dict, printer_name, studio_name, logo_path)

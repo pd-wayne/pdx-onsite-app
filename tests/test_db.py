@@ -47,6 +47,14 @@ class TestUpsertOrder:
         order = db.get_order("GS1777844776")
         assert order["customer_name"] == "ZaTavia Taylor"
 
+    def test_customer_phone_extracted_from_destination(self, fresh_db, pickup_order):
+        """Regression test: customer_phone was never stored at all, so any
+        receipt reprint (which reads back from the DB, not the live PDX
+        payload) always printed a blank phone number."""
+        db.upsert_order(pickup_order)
+        order = db.get_order("GS1777844776")
+        assert order["customer_phone"] == "+12819749028"
+
     def test_gallery_stored_correctly(self, fresh_db, pickup_order):
         db.upsert_order(pickup_order)
         order = db.get_order("GS1777844776")
