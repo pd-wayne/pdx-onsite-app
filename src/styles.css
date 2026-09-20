@@ -189,11 +189,6 @@ body{display:flex;flex-direction:column}
 }
 .td-mono{font-family:var(--font-mono);font-size:10px;letter-spacing:.03em}
 .td-bold{font-weight:600;color:var(--text)}
-.td-badge{
-  display:inline-flex;align-items:center;gap:4px;
-  font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;
-  background:var(--green-bg);border:1px solid rgba(14,203,129,.2);color:var(--green);
-}
 .queue-row-alert td{background:rgba(240,82,82,.04)!important;border-bottom-color:rgba(240,82,82,.1)!important}
 .queue-row-alert tbody tr:hover td{background:rgba(240,82,82,.08)!important}
 .queue-row-warn td{background:rgba(245,166,35,.03)!important}
@@ -518,14 +513,6 @@ body{display:flex;flex-direction:column}
 .toast.info{border-color:rgba(79,142,247,.35)}
 @keyframes toastIn{from{opacity:0;transform:translateX(12px)}to{opacity:1;transform:translateX(0)}}
 @keyframes toastOut{from{opacity:1}to{opacity:0;transform:translateX(12px)}}
-
-/* ── Misc ───────────────────────────────────────────────────────────────── */
-.btn-retry{
-  margin-left:auto;padding:2px 8px;font-size:9px;font-weight:700;
-  background:transparent;border:1px solid rgba(240,82,82,.4);
-  border-radius:4px;color:var(--red);cursor:pointer;transition:all var(--transition);
-}
-.btn-retry:hover{background:var(--red-bg)}
 
 /* ── Queue empty state (no job selected) ──────────────────────────────────── */
 .queue-no-job{

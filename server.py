@@ -1073,26 +1073,6 @@ def create_app(poller, ui_path: str = "") -> Flask:
             return jsonify({"ok": True})
         return jsonify({"ok": False, "error": err2})
 
-    @app.route("/api/retry_download", methods=["POST"])
-    def retry_download():
-        data = request.get_json()
-        order_num = data.get("order_num", "")
-        cfg = config.load()
-        output_folder = cfg.get("image_output_folder", "")
-        api_key = cfg.get("api_key", "")
-        if not output_folder:
-            return jsonify({"ok": False, "error": "No image output folder configured"})
-        images = db.get_images_json(order_num)
-        if not images:
-            return jsonify({"ok": False, "error": "No image data found"})
-        db.set_download_status(order_num, "pending")
-        def _do():
-            ok, err = printer.download_images(images, output_folder, order_num=order_num, api_key=api_key)
-            db.set_download_status(order_num, "ok" if ok else "failed", err)
-            push_event("download_done", {"order_num": order_num, "ok": ok, "error": err})
-        threading.Thread(target=_do, daemon=True).start()
-        return jsonify({"ok": True})
-
     # ── Image serving ─────────────────────────────────────────────────────────
 
     @app.route("/api/image/<order_num>/<path:filename>")

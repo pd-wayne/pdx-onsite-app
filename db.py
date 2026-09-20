@@ -81,13 +81,6 @@ def init_db():
                 message TEXT NOT NULL
             )
         """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key   TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
-
         # ── Routing tables ────────────────────────────────────────────────────
         conn.execute("""
             CREATE TABLE IF NOT EXISTS destinations (
@@ -459,12 +452,6 @@ def get_all_galleries() -> list:
             "SELECT DISTINCT gallery FROM orders WHERE gallery != '' ORDER BY gallery"
         ).fetchall()
         return [r[0] for r in rows]
-
-
-def order_exists(order_num: str) -> bool:
-    with get_conn() as conn:
-        row = conn.execute("SELECT id FROM orders WHERE order_num=?", (order_num,)).fetchone()
-        return row is not None
 
 
 # ── Jobs ──────────────────────────────────────────────────────────────────────
@@ -883,28 +870,6 @@ def check_order_ready(order_num: str) -> bool:
             log.info(f"[DB] Order {order_num} → ready ({total} items printed)")
             return True
         return False
-
-
-# ── Settings ──────────────────────────────────────────────────────────────────
-
-def get_setting(key: str, default=None):
-    with get_conn() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        if row:
-            try:
-                return json.loads(row[0])
-            except Exception:
-                return row[0]
-        return default
-
-
-def set_setting(key: str, value):
-    with get_conn() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (key, json.dumps(value))
-        )
-        conn.commit()
 
 
 # ── Shipping providers (ShipStation, etc.) ─────────────────────────────────────

@@ -115,7 +115,6 @@ function showPanel(name, el) {
   if (el) el.classList.add("active");
   if (name === "scan") setTimeout(() => document.getElementById("scan-input").focus(), 80);
   if (name === "settings") setTimeout(() => loadSettings().catch(console.error), 40);
-  if (name === "history") renderHistory();
   if (name === "samples") loadSamples();
 }
 
@@ -898,30 +897,6 @@ async function refreshHistory() {
   state.history = await apiGet("get_history", { gallery: state.galleryFilter });
 }
 
-function renderHistory() {
-  const tbody = document.getElementById("history-tbody");
-  const sub = document.getElementById("history-sub");
-  if (!tbody) return;
-  if (!state.history.length) {
-    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:36px;color:var(--text3)">No confirmed orders yet</td></tr>`;
-    if (sub) sub.textContent = "No orders confirmed"; return;
-  }
-  if (sub) sub.textContent = `${state.history.length} order(s) confirmed`;
-  tbody.innerHTML = state.history.map(o => {
-    const items = parseItems(o.items_json);
-    const itemStr = items.map(i => `${i.files||i.qty}× ${i.desc||i.sku}`).join(", ") || "—";
-    const wait = o.confirmed_at && o.received_at ? formatAge((new Date(o.confirmed_at)-new Date(o.received_at))/60000) : "—";
-    return `<tr onclick="openDetail('${esc(o.order_num)}')">
-      <td class="td-mono">${esc(o.order_num)}</td>
-      <td class="td-bold">${esc(o.customer_name)}</td>
-      <td style="font-size:11px;color:var(--text3)">${esc(o.gallery||"—")}</td>
-      <td style="font-size:11px">${esc(itemStr)}</td>
-      <td class="td-mono" style="font-size:10px;color:var(--text3)">${formatTime(o.received_at)}</td>
-      <td class="td-mono" style="font-size:10px;color:var(--text3)">${formatTime(o.confirmed_at)}</td>
-      <td><span class="td-badge">✓ ${esc(wait)}</span></td>
-    </tr>`;
-  }).join("");
-}
 
 // ── Scan ───────────────────────────────────────────────────────────────────
 function onScanInput() {
@@ -1106,13 +1081,6 @@ async function pollNow() {
   btn.textContent = "↻ Polling…"; btn.disabled = true;
   await apiPost("trigger_poll");
   setTimeout(async () => { await refreshAll(); btn.textContent = "↻ Poll Now"; btn.disabled = false; }, 2000);
-}
-
-async function retryDownload(orderNum, btn) {
-  if (btn) { btn.textContent = "…"; btn.disabled = true; }
-  const result = await apiPost("retry_download", { order_num: orderNum });
-  if (result.ok) { toast(`↻ Retry started`, "info"); await refreshQueue(); }
-  else { toast(`Retry failed: ${result.error}`, "error"); if (btn) { btn.textContent = "Retry"; btn.disabled = false; } }
 }
 
 // ── Settings ───────────────────────────────────────────────────────────────
@@ -1591,14 +1559,6 @@ function loadLogoPreview() {
 }
 
 // ── Galleries ──────────────────────────────────────────────────────────────
-async function refreshGalleries() {
-  const galleries = await apiGet("get_galleries");
-  const sel = document.getElementById("gallery-filter");
-  if (!sel) return;
-  const current = sel.value;
-  sel.innerHTML = '<option value="">All Jobs</option>' + galleries.map(g => `<option value="${esc(g)}" ${g===current?"selected":""}>${esc(g)}</option>`).join("");
-}
-
 // ── Activity Log ───────────────────────────────────────────────────────────
 async function loadActivityLog() {
   const lines = await apiGet("activity_log", { limit: 60 });
@@ -1636,7 +1596,7 @@ function toggleLog() {
 
 // ── Refresh All ────────────────────────────────────────────────────────────
 async function refreshAll() {
-  await Promise.all([refreshQueue(), refreshHistory(), refreshStats(), refreshGalleries(), refreshJobs(), loadDestinations()]);
+  await Promise.all([refreshQueue(), refreshHistory(), refreshStats(), refreshJobs(), loadDestinations()]);
   renderQueue();
 }
 
