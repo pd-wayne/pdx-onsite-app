@@ -44,6 +44,11 @@ _sse_clients_lock = threading.Lock()
 _shipping_action_lock = threading.Lock()
 SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"}
 MAX_LOGO_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
+# Sentinel pdx_carrier value for shipping options that never get a real
+# carrier label (e.g. a bulk order dropped off in person at a school) — see
+# mark_ready_to_ship and mark_shipped. PDX doesn't validate the carrier
+# string it's told, so any readable value is safe to send.
+HAND_DELIVERED = "HAND_DELIVERED"
 _pending_update: Optional[dict] = None
 
 
@@ -686,7 +691,8 @@ def create_app(poller, ui_path: str = "") -> Flask:
             shipping = raw.get("shipping") or {}
             option_external_id = (shipping.get("option") or {}).get("externalId", "")
             mapping = db.get_shipping_option_mapping(provider["id"], option_external_id)
-            if not mapping or not mapping.get("carrier_code"):
+            is_hand_delivered = bool(mapping) and mapping.get("pdx_carrier") == HAND_DELIVERED
+            if not mapping or (not mapping.get("carrier_code") and not is_hand_delivered):
                 return jsonify({"ok": False, "error":
                                f"No shipping mapping configured for option \"{option_external_id}\" — "
                                f"set one up in Settings, or use Mark Shipped instead"})
@@ -698,6 +704,21 @@ def create_app(poller, ui_path: str = "") -> Flask:
                 return jsonify({"ok": False, "error":
                                f"Shipping option \"{option_external_id}\" is mapped to a carrier but not a PDX Carrier — "
                                f"finish that mapping in Settings, or use Mark Shipped instead"})
+
+            if is_hand_delivered:
+                # No real carrier is ever involved (e.g. a bulk order dropped off
+                # in person at a school) — never touch ShipStation, just report
+                # straight to PDX. PDX doesn't validate the carrier string.
+                ok, pdx_err = pdx_api.shipped_callback(cfg.get("lab_id", ""), cfg.get("api_key", ""), order_num,
+                                                       carrier="Hand Delivered", tracking_number="")
+                if ok or pdx_api.is_already_shipped_error(pdx_err):
+                    db.confirm_order(order_num)
+                    db.record_shipped_notification(order_num, "Hand Delivered", "", provider["provider_type"])
+                    push_event("order_confirmed", {"order_num": order_num})
+                    _log(f"📬 Ready to ship: {order_num} (Hand Delivered)")
+                    return jsonify({"ok": True, "tracking_number": "", "carrier": "Hand Delivered"})
+                _log(f"Ready to Ship (Hand Delivered) failed for {order_num}: {pdx_err}", "error")
+                return jsonify({"ok": False, "error": pdx_err})
 
             try:
                 adapter = shipping_providers.get_adapter(provider["provider_type"], provider["credentials"])
@@ -788,6 +809,10 @@ def create_app(poller, ui_path: str = "") -> Flask:
         shipping = raw.get("shipping") or {}
         option_external_id = (shipping.get("option") or {}).get("externalId", "")
         mapping = db.get_shipping_option_mapping(provider["id"], option_external_id)
+        if mapping and mapping.get("pdx_carrier") == HAND_DELIVERED:
+            return jsonify({"ok": False, "error":
+                           "This shipping option is mapped to Hand Delivered — no label is ever purchased for it, "
+                           "so there's nothing to test."})
         if not mapping or not mapping.get("carrier_code"):
             return jsonify({"ok": False, "error":
                            f"No shipping mapping configured for option \"{option_external_id}\" — set one up in Settings"})
@@ -889,7 +914,8 @@ def create_app(poller, ui_path: str = "") -> Flask:
         push_event("order_confirmed", {"order_num": order_num})
         return jsonify({"ok": True})
 
-    VALID_CARRIERS = {"UPS", "UPSMI", "FEDEX", "USPS", "DHL", "PICKUP"}
+    VALID_CARRIERS = {"UPS", "UPSMI", "FEDEX", "USPS", "DHL", "PICKUP", HAND_DELIVERED}
+    NO_TRACKING_CARRIERS = {"PICKUP", HAND_DELIVERED}
 
     @app.route("/api/mark_shipped", methods=["POST"])
     def mark_shipped():
@@ -903,7 +929,7 @@ def create_app(poller, ui_path: str = "") -> Flask:
         tracking_number = data.get("tracking_number", "")
         if carrier not in VALID_CARRIERS:
             return jsonify({"ok": False, "error": f"Invalid carrier — must be one of {', '.join(sorted(VALID_CARRIERS))}"})
-        if not tracking_number and carrier != "PICKUP":
+        if not tracking_number and carrier not in NO_TRACKING_CARRIERS:
             return jsonify({"ok": False, "error": "Tracking number is required"})
         # Same lock + dedup log Ready to Ship uses — without both, a station
         # that already shipped this order via the automated flow (or another

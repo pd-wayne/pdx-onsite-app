@@ -706,6 +706,8 @@ function hideShipForm() {
   const form = document.getElementById("detail-ship-form");
   if (form) form.style.display = "none";
   document.getElementById("ship-tracking").value = "";
+  document.getElementById("ship-tracking").disabled = false;
+  document.getElementById("ship-carrier").value = "UPS";
 }
 
 function showReadyToShipForm() {
@@ -721,11 +723,19 @@ function hideReadyToShipForm() {
   if (btn) btn.style.display = "";
 }
 
+function onMarkShippedCarrierChange() {
+  const isHandDelivered = document.getElementById("ship-carrier")?.value === HAND_DELIVERED;
+  const trackingInput = document.getElementById("ship-tracking");
+  if (!trackingInput) return;
+  trackingInput.disabled = isHandDelivered;
+  if (isHandDelivered) trackingInput.value = "";
+}
+
 async function detailMarkShipped() {
   if (!state.selectedOrder) return;
   const carrier = document.getElementById("ship-carrier").value;
   const trackingNumber = document.getElementById("ship-tracking").value.trim();
-  if (!trackingNumber) { toast("Tracking number is required", "error"); return; }
+  if (!trackingNumber && carrier !== HAND_DELIVERED) { toast("Tracking number is required", "error"); return; }
   const result = await apiPost("mark_shipped", {
     order_num: state.selectedOrder.order_num, carrier, tracking_number: trackingNumber
   });
@@ -2011,6 +2021,11 @@ async function discoverSpecs() {
 // each PDX shipping option to the carrier/service/package to request.
 const PDX_CARRIERS = ["UPS", "UPSMI", "FEDEX", "USPS", "DHL"];
 const CONFIRMATION_TYPES = ["none", "delivery", "signature", "adult_signature", "direct_signature"];
+// Sentinel for shipping options that never get a real carrier label (e.g. a
+// bulk order dropped off in person at a school) — Ready to Ship reports this
+// straight to PDX with no tracking number and never touches ShipStation.
+// PDX doesn't validate the carrier string, so this is safe to send as-is.
+const HAND_DELIVERED = "HAND_DELIVERED";
 
 async function loadShippingProviders() {
   state.shippingProviderCatalog = await apiGet("get_shipping_provider_catalog");
@@ -2209,21 +2224,23 @@ async function loadShippingOptionMappings(providerId) {
   wrap.innerHTML = `<div class="ship-option-table">` + header + options.map((opt, i) => {
     const m = byOption[opt.external_id] || {};
     const rowId = `${providerId}-${i}`;
+    const isHandDelivered = m.pdx_carrier === HAND_DELIVERED;
     return `
     <div class="ship-option-row" id="ship-option-row-${rowId}" data-option-id="${esc(opt.external_id)}" data-provider-id="${providerId}">
       <div class="ship-option-label">${!m.pdx_carrier ? "⚠ " : ""}${esc(opt.name || opt.external_id)}<div class="ship-option-code">${esc(opt.external_id)}</div></div>
-      <select class="form-select" id="ship-opt-carrier-${rowId}" onchange="onShippingOptionCarrierChange('${rowId}')">
+      <select class="form-select" id="ship-opt-carrier-${rowId}" onchange="onShippingOptionCarrierChange('${rowId}')" ${isHandDelivered ? "disabled" : ""}>
         <option value="">— Select carrier —</option>
         ${carriers.map(c => `<option value="${esc(c.code)}" ${c.code === m.carrier_code ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
       </select>
-      <select class="form-select" id="ship-opt-service-${rowId}"><option value="">— Select carrier first —</option></select>
-      <select class="form-select" id="ship-opt-package-${rowId}"><option value="">(none)</option></select>
-      <select class="form-select" id="ship-opt-confirmation-${rowId}">
+      <select class="form-select" id="ship-opt-service-${rowId}" ${isHandDelivered ? "disabled" : ""}><option value="">— Select carrier first —</option></select>
+      <select class="form-select" id="ship-opt-package-${rowId}" ${isHandDelivered ? "disabled" : ""}><option value="">(none)</option></select>
+      <select class="form-select" id="ship-opt-confirmation-${rowId}" ${isHandDelivered ? "disabled" : ""}>
         ${CONFIRMATION_TYPES.map(c => `<option value="${c}" ${c === (m.confirmation || "none") ? "selected" : ""}>${c}</option>`).join("")}
       </select>
-      <select class="form-select" id="ship-opt-pdxcarrier-${rowId}">
+      <select class="form-select" id="ship-opt-pdxcarrier-${rowId}" onchange="onPdxCarrierChange('${rowId}')">
         <option value="">— Do not map —</option>
         ${PDX_CARRIERS.map(c => `<option value="${c}" ${c === m.pdx_carrier ? "selected" : ""}>${c}</option>`).join("")}
+        <option value="${HAND_DELIVERED}" ${isHandDelivered ? "selected" : ""}>🚫 Hand Delivered — No Label</option>
       </select>
       <button class="btn-xs btn-xs-blue" onclick="saveShippingOptionMappingRow('${rowId}')">Save</button>
     </div>`;
@@ -2234,6 +2251,19 @@ async function loadShippingOptionMappings(providerId) {
     const m = byOption[opt.external_id];
     if (m && m.carrier_code) onShippingOptionCarrierChange(`${providerId}-${i}`, m.service_code, m.package_code);
   });
+}
+
+// Hand Delivered means no real carrier will ever be involved — gray out the
+// ShipStation-specific columns so it's visually clear nothing else needs
+// picking, and clear any stale carrier/service/package selection.
+function onPdxCarrierChange(rowId) {
+  const isHandDelivered = document.getElementById(`ship-opt-pdxcarrier-${rowId}`)?.value === HAND_DELIVERED;
+  const carrierSel = document.getElementById(`ship-opt-carrier-${rowId}`);
+  const serviceSel = document.getElementById(`ship-opt-service-${rowId}`);
+  const packageSel = document.getElementById(`ship-opt-package-${rowId}`);
+  const confirmationSel = document.getElementById(`ship-opt-confirmation-${rowId}`);
+  [carrierSel, serviceSel, packageSel, confirmationSel].forEach(sel => { if (sel) sel.disabled = isHandDelivered; });
+  if (isHandDelivered && carrierSel) carrierSel.value = "";
 }
 
 async function onShippingOptionCarrierChange(rowId, preselectService = "", preselectPackage = "") {
@@ -2266,15 +2296,20 @@ async function saveShippingOptionMappingRow(rowId) {
   if (!row) return;
   const providerId = parseInt(row.dataset.providerId);
   const optionId = row.dataset.optionId;
+  const pdxCarrier = document.getElementById(`ship-opt-pdxcarrier-${rowId}`).value || null;
+  const isHandDelivered = pdxCarrier === HAND_DELIVERED;
   const result = await apiPost("save_shipping_option_mapping", {
     provider_id: providerId,
     pdx_option_external_id: optionId,
     pdx_option_name: (state.knownShippingOptions || []).find(o => o.external_id === optionId)?.name || "",
-    carrier_code: document.getElementById(`ship-opt-carrier-${rowId}`).value,
-    service_code: document.getElementById(`ship-opt-service-${rowId}`).value,
-    package_code: document.getElementById(`ship-opt-package-${rowId}`).value,
-    confirmation: document.getElementById(`ship-opt-confirmation-${rowId}`).value,
-    pdx_carrier: document.getElementById(`ship-opt-pdxcarrier-${rowId}`).value || null,
+    // Hand Delivered never buys a real label — no carrier/service/package/
+    // confirmation applies, so save them blank regardless of whatever a
+    // disabled select still holds from before it was picked.
+    carrier_code: isHandDelivered ? "" : document.getElementById(`ship-opt-carrier-${rowId}`).value,
+    service_code: isHandDelivered ? "" : document.getElementById(`ship-opt-service-${rowId}`).value,
+    package_code: isHandDelivered ? "" : document.getElementById(`ship-opt-package-${rowId}`).value,
+    confirmation: isHandDelivered ? "none" : document.getElementById(`ship-opt-confirmation-${rowId}`).value,
+    pdx_carrier: pdxCarrier,
   });
   if (result.ok) {
     toast(`Mapping saved for "${optionId}"`, "success");

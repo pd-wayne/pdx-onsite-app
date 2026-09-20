@@ -487,6 +487,24 @@ class TestMarkShipped:
         assert calls == [("SHIP001", "UPS", "1Z999")]
         assert db.get_order("SHIP001")["status"] == "fulfilled"
 
+    def test_hand_delivered_does_not_require_tracking_number(self, client, monkeypatch):
+        import api as pdx_api
+        db.upsert_order({"num": "SHIP003", "gallery": "G", "status": "received",
+                         "placedAt": "2026-01-01T00:00:00Z", "items": [],
+                         "shipping": {"option": {"externalId": "economy-bulk"},
+                                      "destination": {"recipient": "C"}}})
+        calls = []
+        monkeypatch.setattr(pdx_api, "shipped_callback",
+                           lambda lab_id, api_key, order_num, carrier="Pickup", tracking_number="":
+                               (calls.append((order_num, carrier, tracking_number)), (True, ""))[1])
+
+        resp = client.post("/api/mark_shipped",
+                           data=json.dumps({"order_num": "SHIP003", "carrier": "hand_delivered", "tracking_number": ""}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert calls == [("SHIP003", "HAND_DELIVERED", "")]
+        assert db.get_order("SHIP003")["status"] == "fulfilled"
+
     def test_pdx_failure_does_not_confirm_order(self, client, monkeypatch):
         import api as pdx_api
         db.upsert_order({"num": "SHIP002", "gallery": "G", "status": "received",
@@ -1184,6 +1202,48 @@ class TestMarkReadyToShip:
         assert resp.get_json()["ok"] is True
         assert db.has_shipped_notification("ORD001") is True
 
+    def test_hand_delivered_mapping_never_touches_shipstation(self, client, monkeypatch):
+        """A bulk order dropped off in person at a school should never buy a
+        real label — this mapping skips ShipStation entirely and reports
+        straight to PDX."""
+        import shipping_providers as sp
+        import api as pdx_api
+        db.upsert_order(self._order(option_external_id="economy-bulk"))
+        self._provider_with_mapping(option_external_id="economy-bulk", pdx_carrier="HAND_DELIVERED")
+        create_order_calls = []
+        create_label_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order",
+                           lambda self, order: (create_order_calls.append(1), ("should not be used", ""))[1])
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: (create_label_calls.append(1), ({"tracking_number": "X"}, ""))[1])
+        pdx_calls = []
+        monkeypatch.setattr(pdx_api, "shipped_callback",
+                           lambda lab_id, api_key, order_num, carrier="Pickup", tracking_number="":
+                               (pdx_calls.append((order_num, carrier, tracking_number)), (True, ""))[1])
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["carrier"] == "Hand Delivered"
+        assert data["tracking_number"] == ""
+        assert not create_order_calls
+        assert not create_label_calls
+        assert pdx_calls == [("ORD001", "Hand Delivered", "")]
+        assert db.has_shipped_notification("ORD001") is True
+        assert db.get_order("ORD001")["status"] == "fulfilled"
+
+    def test_hand_delivered_pdx_failure_does_not_confirm(self, client, monkeypatch):
+        import api as pdx_api
+        db.upsert_order(self._order(option_external_id="economy-bulk"))
+        self._provider_with_mapping(option_external_id="economy-bulk", pdx_carrier="HAND_DELIVERED")
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (False, "bad api key"))
+
+        resp = client.post("/api/mark_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert db.has_shipped_notification("ORD001") is False
+        assert db.get_order("ORD001")["status"] != "fulfilled"
+
 
 class TestGetShippingLabel:
     def test_404_when_no_label_on_file(self, client):
@@ -1245,6 +1305,20 @@ class TestReadyToShipTestMode:
         data = resp.get_json()
         assert data["ok"] is False
         assert "mapping" in data["error"].lower()
+
+    def test_hand_delivered_mapping_has_nothing_to_test(self, client, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_order(self._order(option_external_id="economy-bulk"))
+        self._provider_with_mapping(option_external_id="economy-bulk", pdx_carrier="HAND_DELIVERED")
+        create_order_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order",
+                           lambda self, order: (create_order_calls.append(1), ("x", ""))[1])
+
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "hand delivered" in data["error"].lower()
+        assert not create_order_calls
 
     def test_success_does_not_touch_real_order_state(self, client, monkeypatch):
         import shipping_providers as sp
