@@ -1819,11 +1819,11 @@ function addDestination() {
   row.innerHTML = `
     <input class="form-input" style="width:130px;flex-shrink:0" id="dest-name-new" value="${esc(nextName)}" placeholder="Name (e.g. 8x10)">
     <input class="form-input mono" style="flex:1;min-width:0" id="dest-path-new" placeholder="C:\\Hot Folder\\Path">
-    <button class="btn-xs btn-xs-ghost" onclick="browseDestFolderNew()">…</button>
+    <button class="btn-xs btn-xs-ghost" onclick="browseDestFolder('new')">…</button>
     <label class="dest-default-label">
-      <input type="radio" name="dest-default" value="0"> Default
+      <input type="radio" name="dest-default" value="new"> Default
     </label>
-    <button class="btn-xs btn-xs-blue" onclick="saveNewDestination()">Save</button>
+    <button class="btn-xs btn-xs-blue" id="dest-save-new" onclick="saveDestination('new')">Save</button>
     <button class="btn-xs btn-xs-ghost dest-delete" onclick="document.getElementById('dest-row-new').remove()">✕</button>
   `;
   list.insertBefore(row, list.firstChild);
@@ -1832,35 +1832,19 @@ function addDestination() {
 }
 
 async function saveDestination(id) {
+  const isNew = id === "new";
   const name = document.getElementById(`dest-name-${id}`)?.value.trim();
   const path = document.getElementById(`dest-path-${id}`)?.value.trim();
   const isDefault = document.querySelector(`input[name="dest-default"][value="${id}"]`)?.checked || false;
   if (!name || !path) { toast("Name and path are required", "error"); return; }
-  const result = await apiPost("save_destination", { id, name, hot_folder_path: path, is_default: isDefault, active: true });
+  const payload = { name, hot_folder_path: path, is_default: isDefault, active: true };
+  if (!isNew) payload.id = id; // omitted for a new row so the backend inserts instead of updating
+  const result = await apiPost("save_destination", payload);
   if (result.ok) {
     const btn = document.getElementById(`dest-save-${id}`);
     if (btn) { btn.textContent = "✓ Saved"; btn.classList.add("btn-xs-saved"); btn.disabled = true; }
-    toast("Destination saved", "success");
+    toast(isNew ? "Destination added" : "Destination saved", "success");
     await new Promise(r => setTimeout(r, 700)); // let the "Saved" state register before the row re-renders
-    await loadDestinations();
-    renderRouting();
-  } else {
-    toast(`Save failed: ${result.error}`, "error");
-  }
-}
-
-async function saveNewDestination() {
-  const name = document.getElementById("dest-name-new")?.value.trim();
-  const path = document.getElementById("dest-path-new")?.value.trim();
-  const isDefault = document.querySelector('input[name="dest-default"][value="0"]')?.checked || false;
-  if (!name || !path) { toast("Name and path are required", "error"); return; }
-  const result = await apiPost("save_destination", { name, hot_folder_path: path, is_default: isDefault, active: true });
-  if (result.ok) {
-    const row = document.getElementById("dest-row-new");
-    const btn = row?.querySelector(".btn-xs-blue");
-    if (btn) { btn.textContent = "✓ Saved"; btn.classList.add("btn-xs-saved"); btn.disabled = true; }
-    toast("Destination added", "success");
-    await new Promise(r => setTimeout(r, 700));
     await loadDestinations();
     renderRouting();
   } else {
@@ -1879,14 +1863,6 @@ async function browseDestFolder(id) {
   const result = await apiGet("browse_folder_dest");
   if (result.ok && result.path) {
     const el = document.getElementById(`dest-path-${id}`);
-    if (el) el.value = result.path;
-  }
-}
-
-async function browseDestFolderNew() {
-  const result = await apiGet("browse_folder_dest");
-  if (result.ok && result.path) {
-    const el = document.getElementById("dest-path-new");
     if (el) el.value = result.path;
   }
 }
