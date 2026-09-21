@@ -452,6 +452,50 @@ class TestOrderActions:
         entry = next(e for e in log if "ORD002" in e["message"])
         assert entry["message"] == "✅ Confirmed (scanned): ORD002"
 
+    def test_success_records_shipped_notification(self, client, monkeypatch):
+        import api as pdx_api
+        db.upsert_order({"num": "ORD003", "gallery": "Test Job",
+                         "shipping": {"option": {"externalId": "pdx_pickup"}, "destination": {}}})
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (True, ""))
+
+        resp = client.post("/api/confirm_order", data=json.dumps({"order_num": "ORD003"}), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert db.has_shipped_notification("ORD003") is True
+
+    def test_double_scan_returns_clean_already_shipped_error(self, client, monkeypatch):
+        """Regression test: confirm_order had no dedup check at all, unlike
+        Mark Shipped/Ready to Ship — an eager double-scan of the same QR code
+        would hit whatever raw error PDX's own rejection happened to say."""
+        import api as pdx_api
+        db.upsert_order({"num": "ORD004", "gallery": "Test Job",
+                         "shipping": {"option": {"externalId": "pdx_pickup"}, "destination": {}}})
+        calls = []
+        monkeypatch.setattr(pdx_api, "shipped_callback",
+                           lambda *a, **k: (calls.append(1), (True, ""))[1])
+
+        first = client.post("/api/confirm_order", data=json.dumps({"order_num": "ORD004"}), content_type="application/json")
+        second = client.post("/api/confirm_order", data=json.dumps({"order_num": "ORD004"}), content_type="application/json")
+
+        assert first.get_json()["ok"] is True
+        data = second.get_json()
+        assert data["ok"] is False
+        assert data["error"] == "Order already marked shipped"
+        assert len(calls) == 1  # the second scan never even hit PDX
+
+    def test_pdx_already_shipped_rejection_is_treated_as_success(self, client, monkeypatch):
+        """Covers the case a local dedup check can't: PDX already knows the
+        order shipped (e.g. another station confirmed it) even though this
+        station's own shipped_notifications table doesn't have a record yet."""
+        import api as pdx_api
+        db.upsert_order({"num": "ORD005", "gallery": "Test Job",
+                         "shipping": {"option": {"externalId": "pdx_pickup"}, "destination": {}}})
+        monkeypatch.setattr(pdx_api, "shipped_callback", lambda *a, **k: (False, "Order already shipped"))
+
+        resp = client.post("/api/confirm_order", data=json.dumps({"order_num": "ORD005"}), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert db.get_order("ORD005")["status"] == "fulfilled"
+        assert db.has_shipped_notification("ORD005") is True
+
     def test_fulfill_order_no_images(self, client):
         resp = client.post("/api/fulfill_order",
                            data=json.dumps({"order_num": "NOTEXIST"}),

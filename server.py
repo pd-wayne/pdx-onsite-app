@@ -908,15 +908,24 @@ def create_app(poller, ui_path: str = "") -> Flask:
     def confirm_order():
         data = request.get_json()
         order_num = data.get("order_num", "")
-        cfg = config.load()
-        ok, err = pdx_api.shipped_callback(cfg.get("lab_id", ""), cfg.get("api_key", ""), order_num)
-        if not ok:
-            _log(f"Confirm failed for {order_num}: {err}", "error")
-            return jsonify({"ok": False, "error": err})
-        db.confirm_order(order_num)
-        _log(f"✅ Confirmed (scanned): {order_num}{_station_tag()}")
-        push_event("order_confirmed", {"order_num": order_num})
-        return jsonify({"ok": True})
+        # Same lock + dedup log Mark Shipped/Ready to Ship use — without it, an
+        # eager double-scan of the same QR code hits PDX's "already shipped"
+        # rejection as a raw error instead of a clean no-op, and a
+        # near-simultaneous scan from a second station could both pass a
+        # not-yet-recorded check.
+        with _shipping_action_lock:
+            if db.has_shipped_notification(order_num):
+                return jsonify({"ok": False, "error": "Order already marked shipped"})
+            cfg = config.load()
+            ok, err = pdx_api.shipped_callback(cfg.get("lab_id", ""), cfg.get("api_key", ""), order_num)
+            if not ok and not pdx_api.is_already_shipped_error(err):
+                _log(f"Confirm failed for {order_num}: {err}", "error")
+                return jsonify({"ok": False, "error": err})
+            db.confirm_order(order_num)
+            db.record_shipped_notification(order_num, "Pickup", "", "manual")
+            _log(f"✅ Confirmed (scanned): {order_num}{_station_tag()}")
+            push_event("order_confirmed", {"order_num": order_num})
+            return jsonify({"ok": True})
 
     VALID_CARRIERS = {"UPS", "UPSMI", "FEDEX", "USPS", "DHL", "PICKUP", HAND_DELIVERED}
     NO_TRACKING_CARRIERS = {"PICKUP", HAND_DELIVERED}
