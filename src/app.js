@@ -1030,6 +1030,12 @@ function updateSampleCount() {
 async function browseSamplesFolder() {
   const result = await apiGet("browse_folder");
   if (result.ok && result.path) {
+    // Persist immediately — this used to only update in-memory state, so the
+    // folder silently reverted to whatever Settings had saved the next time
+    // the app launched. Settings' own Samples Folder field stays in sync
+    // since it re-reads samples_folder from get_settings each time it opens.
+    const saved = await apiPost("save_settings", { samples_folder: result.path });
+    if (!saved.ok) { toast(`Could not save samples folder: ${saved.error}`, "error"); return; }
     state.samplesFolder = result.path;
     await loadSamples();
   }

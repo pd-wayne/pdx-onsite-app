@@ -313,7 +313,11 @@ def create_app(poller, ui_path: str = "") -> Flask:
             data = request.get_json()
             ok = config.save(data)
             if ok:
-                poller.configure(data.get("lab_id", ""), data.get("api_key", ""), int(data.get("poll_interval", 60)))
+                # Reconfigure the poller from the merged, currently-saved config —
+                # not the raw posted payload — so a partial save (e.g. just the
+                # samples folder) can never blank out live lab_id/api_key.
+                cfg = config.load()
+                poller.configure(cfg.get("lab_id", ""), cfg.get("api_key", ""), int(cfg.get("poll_interval", 60)))
                 if data.get("lab_id") and data.get("api_key") and not poller.running:
                     poller.start()
                 if data.get("image_output_folder"):

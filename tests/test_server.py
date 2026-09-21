@@ -56,6 +56,21 @@ class TestSettings:
         assert resp.status_code == 200
         assert resp.get_json()["ok"] is True
 
+    def test_partial_save_does_not_blank_live_poller_credentials(self, client):
+        """Regression test: save_settings used to reconfigure the poller from
+        the raw POSTED payload (data.get("lab_id", "")), not the merged saved
+        config. A full settings save always includes lab_id/api_key so this
+        never showed up in practice, but any partial save (e.g. just the
+        samples folder) would silently blank the live poller's credentials."""
+        client.post("/api/save_settings",
+                    data=json.dumps({"lab_id": "LAB1", "api_key": "KEY1"}), content_type="application/json")
+        assert client.application.test_poller.lab_id == "LAB1"
+
+        client.post("/api/save_settings",
+                    data=json.dumps({"samples_folder": "/Users/studio/Samples"}), content_type="application/json")
+        assert client.application.test_poller.lab_id == "LAB1"
+        assert client.application.test_poller.api_key == "KEY1"
+
     def test_save_then_get_roundtrip(self, client):
         payload = {
             "lab_id": "lab123",

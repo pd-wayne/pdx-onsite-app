@@ -94,6 +94,8 @@ class MockPoller:
         self.running = False
         self.last_poll = None
         self.last_error = ""
+        self.lab_id = ""
+        self.api_key = ""
         self.interval = 60
         self.next_poll_at = None
         self.on_new_orders = None
@@ -103,7 +105,9 @@ class MockPoller:
         self.on_order_ready = None
 
     def configure(self, lab_id, api_key, interval):
-        pass
+        self.lab_id = lab_id
+        self.api_key = api_key
+        self.interval = interval
 
     def start(self):
         self.running = True
@@ -138,8 +142,10 @@ def app(tmp_path, monkeypatch):
 
     from server import create_app
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    flask_app = create_app(poller=MockPoller(), ui_path=os.path.join(project_root, "src"))
+    mock_poller = MockPoller()
+    flask_app = create_app(poller=mock_poller, ui_path=os.path.join(project_root, "src"))
     flask_app.config["TESTING"] = True
+    flask_app.test_poller = mock_poller  # exposed so tests can assert on poller.configure() calls
     return flask_app
 
 
