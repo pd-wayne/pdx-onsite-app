@@ -39,9 +39,21 @@ async function apiPost(path, body = {}) {
 }
 
 // ── SSE ────────────────────────────────────────────────────────────────────
+let _sseEverOpened = false; // survives only this page load, by design — see onopen below
 function initSSE() {
   const es = new EventSource("/api/events");
   es.onopen = () => {
+    // A dropped-then-restored connection on the primary/standalone station
+    // means the local backend process itself restarted — the only time that
+    // happens in production is mid self-update (the running .exe is swapped
+    // and relaunched). Reload so we pick up whatever new frontend shipped
+    // with the update and don't leave stale UI state (e.g. the update
+    // button stuck on "Restarting…") behind from the old page load.
+    if (_sseEverOpened && state.stationInfo?.role !== "secondary") {
+      window.location.reload();
+      return;
+    }
+    _sseEverOpened = true;
     if (state._stationWasDisconnected) {
       state._stationWasDisconnected = false;
       hideStationReconnectBanner();
