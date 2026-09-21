@@ -97,6 +97,49 @@ class TestSettings:
         assert data["ok"] is False
 
 
+class TestBrowseFolder:
+    """browse_folder and browse_folder_dest share one implementation
+    (_browse_for_folder) — they only ever differed in the dialog title."""
+
+    def test_browse_folder_returns_chosen_path(self, client, monkeypatch):
+        import server as server_module
+        monkeypatch.setattr(server_module.tk, "Tk", lambda: _FakeTkRoot())
+        monkeypatch.setattr(server_module.filedialog, "askdirectory",
+                           lambda title="": "/Users/studio/Chosen")
+        resp = client.get("/api/browse_folder")
+        assert resp.get_json() == {"ok": True, "path": "/Users/studio/Chosen"}
+
+    def test_browse_folder_dest_returns_chosen_path(self, client, monkeypatch):
+        import server as server_module
+        monkeypatch.setattr(server_module.tk, "Tk", lambda: _FakeTkRoot())
+        monkeypatch.setattr(server_module.filedialog, "askdirectory",
+                           lambda title="": "/Users/studio/Destinations/Printer1")
+        resp = client.get("/api/browse_folder_dest")
+        assert resp.get_json() == {"ok": True, "path": "/Users/studio/Destinations/Printer1"}
+
+    def test_cancelled_dialog_returns_ok_false_no_error(self, client, monkeypatch):
+        import server as server_module
+        monkeypatch.setattr(server_module.tk, "Tk", lambda: _FakeTkRoot())
+        monkeypatch.setattr(server_module.filedialog, "askdirectory", lambda title="": "")
+        resp = client.get("/api/browse_folder")
+        assert resp.get_json() == {"ok": False, "path": ""}
+
+    def test_tkinter_error_is_caught(self, client, monkeypatch):
+        import server as server_module
+        def _raise(): raise RuntimeError("no display")
+        monkeypatch.setattr(server_module.tk, "Tk", _raise)
+        resp = client.get("/api/browse_folder")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "no display" in data["error"]
+
+
+class _FakeTkRoot:
+    def withdraw(self): pass
+    def attributes(self, *a): pass
+    def destroy(self): pass
+
+
 # ── Primary destination naming ─────────────────────────────────────────────────
 
 class TestSetPrimaryDestinationName:

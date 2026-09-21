@@ -116,6 +116,23 @@ def _station_tag() -> str:
     return f" ({name})" if name else ""
 
 
+def _browse_for_folder(title: str) -> dict:
+    """Opens a native folder-picker dialog and returns the chosen path — shared
+    by /api/browse_folder and /api/browse_folder_dest, which only ever differed
+    in the dialog's title string."""
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askdirectory(title=title)
+        root.destroy()
+        if path:
+            return {"ok": True, "path": os.path.normpath(path)}
+        return {"ok": False, "path": ""}
+    except Exception as e:
+        return {"ok": False, "path": "", "error": str(e)}
+
+
 def create_app(poller, ui_path: str = "") -> Flask:
     app = Flask(__name__, static_folder=None)
 
@@ -387,17 +404,7 @@ def create_app(poller, ui_path: str = "") -> Flask:
 
     @app.route("/api/browse_folder")
     def browse_folder():
-        try:
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            path = filedialog.askdirectory(title="Select Folder")
-            root.destroy()
-            if path:
-                return jsonify({"ok": True, "path": os.path.normpath(path)})
-            return jsonify({"ok": False, "path": ""})
-        except Exception as e:
-            return jsonify({"ok": False, "path": "", "error": str(e)})
+        return jsonify(_browse_for_folder("Select Folder"))
 
     # ── Jobs ──────────────────────────────────────────────────────────────────
 
@@ -480,17 +487,7 @@ def create_app(poller, ui_path: str = "") -> Flask:
     @app.route("/api/browse_folder_dest")
     def browse_folder_dest():
         """Same as browse_folder but used for destination path selection."""
-        try:
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            path = filedialog.askdirectory(title="Select Destination Folder")
-            root.destroy()
-            if path:
-                return jsonify({"ok": True, "path": os.path.normpath(path)})
-            return jsonify({"ok": False, "path": ""})
-        except Exception as e:
-            return jsonify({"ok": False, "path": "", "error": str(e)})
+        return jsonify(_browse_for_folder("Select Destination Folder"))
 
     # ── Product routing ────────────────────────────────────────────────────────
 
