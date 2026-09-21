@@ -1,5 +1,5 @@
 {
-  "version": "2.3.0",
+  "version": "2.3.1",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.3.0 — Real shipping labels + multi-station support\n\n• Automatically buy real shipping labels (ShipStation) for orders that ship instead of getting picked up in person\n• Run more than one pickup/print station off one shared backend\n• Fixed: reprinted receipts were missing the customer's phone number\n• Fixed: samples folder picked in the app now actually saves"
+  "release_notes": "v2.3.1 — Fix stuck update button\n\n• Fixed: after installing an update, the \"Restarting…\" button could get stuck on screen instead of clearing once the app came back up"
 }
