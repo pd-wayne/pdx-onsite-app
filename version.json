@@ -1,5 +1,5 @@
 {
-  "version": "2.2.3",
+  "version": "2.3.0",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.2.3 — Staging connection errors now show the real reason instead of a generic message"
+  "release_notes": "v2.3.0 — Real shipping labels + multi-station support\n\n• Automatically buy real shipping labels (ShipStation) for orders that ship instead of getting picked up in person\n• Run more than one pickup/print station off one shared backend\n• Fixed: reprinted receipts were missing the customer's phone number\n• Fixed: samples folder picked in the app now actually saves"
 }
