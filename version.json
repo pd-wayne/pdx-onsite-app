@@ -1,5 +1,5 @@
 {
-  "version": "2.3.1",
+  "version": "2.3.2",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.3.1 — Fix stuck update button\n\n• Fixed: after installing an update, the \"Restarting…\" button could get stuck on screen instead of clearing once the app came back up"
+  "release_notes": "v2.3.2 — Shipping fixes and clearer labels\n\n• Fixed: orders with a spelled-out country (e.g. \"United States\") were rejected when buying a shipping label\n• Fixed: Ready to Ship and Mark Shipped could both be open at once, and Cancel could leave Mark Shipped stuck missing\n• Confirm Shipped now stays disabled until a carrier and tracking number are actually entered\n• Test Label and Print Test Label now work even when ShipStation can't issue a free test label — it buys and automatically refunds one instead\n• Clearer one-line explanations under the shipping buttons so it's obvious what each one does\n• New \"Last Shipping Errors\" tool in Settings for diagnosing a ShipStation problem without digging through the full Activity Log"
 }
