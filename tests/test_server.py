@@ -1484,25 +1484,86 @@ class TestReadyToShipTestMode:
         assert data["ok"] is False
         assert data["error"] == "carrier down"
 
-    def test_walleted_carrier_test_label_unsupported_gets_a_clear_explanation(self, client, monkeypatch):
-        # Real ShipStation platform limitation (confirmed against their own
-        # docs) — a "walleted" carrier (ShipStation's own included UPS/FedEx
-        # rates) can never issue a test label, only a carrier account the
-        # studio connected directly. This should read as "use Buy Label or
-        # Mark Shipped instead," not a raw ShipStation exception dump.
+    def test_walleted_carrier_falls_back_to_buy_then_void(self, client, monkeypatch):
+        # ShipStation's own documented answer for a "walleted" carrier
+        # (which never supports testLabel=true): buy a real label, then
+        # void it — refunded to the account balance, usually right away.
         import shipping_providers as sp
         db.upsert_order(self._order())
         self._provider_with_mapping()
         monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("TEST-999", ""))
-        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
-                           lambda self, *a, **k: (None, "ShipStation error: Test labels are not supported."))
+
+        create_label_calls = []
+        def fake_create_label(self, *a, **k):
+            create_label_calls.append(k)
+            if k.get("test_label"):
+                return None, "ShipStation error: Test labels are not supported."
+            return {"tracking_number": "1Z999", "label_data": "ZmFrZQ==", "shipment_id": 443105328}, ""
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", fake_create_label)
+
+        void_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "void_label",
+                           lambda self, shipment_id: (void_calls.append(shipment_id), (True, ""))[1])
+
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["tracking_number"] == "1Z999"
+        assert data["voided"] is True
+        assert void_calls == [443105328]
+        # First call (test_label=True) fails, second (test_label=False) is the real buy.
+        assert len(create_label_calls) == 2
+
+    def test_walleted_carrier_void_failure_is_flagged_not_hidden(self, client, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("TEST-999", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", lambda self, *a, **k: (
+            (None, "ShipStation error: Test labels are not supported.") if k.get("test_label")
+            else ({"tracking_number": "1Z999", "label_data": "ZmFrZQ==", "shipment_id": 443105328}, "")
+        ))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "void_label", lambda self, shipment_id: (False, "Label already used"))
+
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        # Still succeeds (a real label was bought and can still be printed) but
+        # clearly flags that the refund didn't happen automatically.
+        assert data["ok"] is True
+        assert data["voided"] is False
+
+    def test_walleted_carrier_real_purchase_failure_is_reported(self, client, monkeypatch):
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("TEST-999", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label", lambda self, *a, **k: (
+            (None, "ShipStation error: Test labels are not supported.") if k.get("test_label")
+            else (None, "Insufficient funds")
+        ))
 
         resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
         data = resp.get_json()
         assert data["ok"] is False
-        assert "test labels" in data["error"].lower()
-        assert "buy label" in data["error"].lower()
-        assert "mark shipped" in data["error"].lower()
+        assert "Insufficient funds" in data["error"]
+
+    def test_unrelated_label_error_is_not_retried_as_a_real_purchase(self, client, monkeypatch):
+        # Only the specific "not supported" error should ever trigger a real
+        # buy — anything else (bad weight, no service, etc.) must just fail,
+        # never risk spending real money for the wrong reason.
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("TEST-999", ""))
+        create_label_calls = []
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: (create_label_calls.append(k), (None, "Invalid weight"))[1])
+
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert data["error"] == "Invalid weight"
+        assert len(create_label_calls) == 1
 
 
 # ── Multi-station (same-location, onsite-only) ────────────────────────────────

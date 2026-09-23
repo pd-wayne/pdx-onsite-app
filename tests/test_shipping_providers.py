@@ -180,6 +180,55 @@ class TestShipStationV1CreateLabel:
         adapter.create_label("555", "ups", "ups_ground", "", "none", "2026-07-28", 2.5)
         assert captured["weight"] == {"value": 2.5, "units": "pounds"}
 
+    def test_result_includes_shipment_id_for_later_voiding(self, monkeypatch):
+        adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(
+            {"trackingNumber": "1Z999", "shipmentId": 443105328}))
+        result, err = adapter.create_label("555", "ups", "ups_ground", "", "none", "2026-07-28", 0.1)
+        assert err == ""
+        assert result["shipment_id"] == 443105328
+
+
+class TestShipStationV1VoidLabel:
+    """ShipStation's own documented way to test a walleted carrier (which
+    never supports testLabel=true): buy a real label, then void it — the
+    walleted balance is refunded, usually right away."""
+
+    def test_missing_credentials_returns_error(self):
+        adapter = sp.ShipStationV1Adapter({})
+        voided, err = adapter.void_label(443105328)
+        assert voided is False
+        assert "required" in err.lower()
+
+    def test_approved_void_is_success(self, monkeypatch):
+        adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
+        captured = {}
+        def fake_post(url, auth, json, timeout):
+            captured.update(json)
+            return _FakeResponse({"approved": True, "message": "Label voided successfully"})
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        voided, err = adapter.void_label(443105328)
+        assert voided is True
+        assert err == ""
+        assert captured == {"shipmentId": 443105328}
+
+    def test_unapproved_void_is_reported(self, monkeypatch):
+        adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(
+            {"approved": False, "message": "Label already used"}))
+        voided, err = adapter.void_label(443105328)
+        assert voided is False
+        assert err == "Label already used"
+
+    def test_http_error_is_reported(self, monkeypatch):
+        adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(
+            {}, ok=False, status_code=500, text="server error"))
+        voided, err = adapter.void_label(443105328)
+        assert voided is False
+        assert err != ""
+
     def test_http_error_returns_message(self, monkeypatch):
         adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
         monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse({}, ok=False, status_code=500, text="Server error"))

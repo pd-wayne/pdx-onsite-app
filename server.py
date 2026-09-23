@@ -847,24 +847,37 @@ def create_app(poller, ui_path: str = "") -> Flask:
             mapping.get("package_code", ""), mapping.get("confirmation", "none"), ship_date,
             weight_lb, test_label=True,
         )
-        if err:
-            if "test labels are not supported" in err.lower():
-                # Real ShipStation platform limitation, not a bug here: a
-                # "walleted" carrier (ShipStation's own included UPS/FedEx
-                # rates, billed straight from the account balance) can never
-                # issue a void/test label — only a carrier account the
-                # studio connected directly supports that. Confirmed against
-                # ShipStation's own docs, not a guess.
-                return jsonify({"ok": False, "error":
-                               f"\"{mapping['carrier_code']}\" doesn't support test labels — this is a "
-                               f"ShipStation limitation for its own included carrier rates, not something "
-                               f"this app can work around. Use Buy Label for a real test instead, or Mark "
-                               f"Shipped to skip ShipStation entirely."})
+        voided = None
+        if err and "test labels are not supported" in err.lower():
+            # Real ShipStation platform limitation, not a bug here: a
+            # "walleted" carrier (ShipStation's own included UPS/FedEx
+            # rates, billed straight from the account balance) can never
+            # issue a void/test label — confirmed against ShipStation's own
+            # docs. Their own documented workaround for this exact case is
+            # to buy a real label and void it immediately — walleted
+            # carriers refund to the account balance right away in most
+            # cases. Only ever falls back to this for that specific error;
+            # any other failure (bad address, no service, etc.) is reported
+            # as-is rather than risking a real purchase for the wrong reason.
+            result, err = adapter.create_label(
+                test_external_order_id, mapping["carrier_code"], mapping["service_code"],
+                mapping.get("package_code", ""), mapping.get("confirmation", "none"), ship_date,
+                weight_lb, test_label=False,
+            )
+            if err:
+                return jsonify({"ok": False, "error": f"Couldn't buy a real test label either: {err}"})
+            shipment_id = result.get("shipment_id")
+            voided, void_err = adapter.void_label(shipment_id) if shipment_id else (False, "No shipment ID returned")
+            if not voided:
+                _log(f"Test label: bought a real label for {order_num} (shipment {shipment_id}) but voiding it "
+                    f"failed — {void_err}. Check ShipStation directly.", "error")
+        elif err:
             return jsonify({"ok": False, "error": err})
         return jsonify({
             "ok": True,
             "tracking_number": result.get("tracking_number", ""),
             "label_data": result.get("label_data", ""),
+            "voided": voided,
         })
 
     # ── Job mode ───────────────────────────────────────────────────────────────

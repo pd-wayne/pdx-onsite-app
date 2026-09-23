@@ -817,6 +817,9 @@ async function detailMarkShipped() {
     }
     const bytes = Uint8Array.from(atob(printResult.label_data), c => c.charCodeAt(0));
     openAndPrintPdf(win, new Blob([bytes], { type: "application/pdf" }));
+    if (printResult.voided === false) {
+      toast(`⚠️ Bought a real label for this test but couldn't void it — check ShipStation directly`, "error");
+    }
   }
 
   const result = await apiPost("mark_shipped", { order_num: orderNum, carrier, tracking_number: trackingNumber });
@@ -899,12 +902,28 @@ async function printTestLabel() {
   const result = await apiPost("test_ready_to_ship", { order_num: orderNum, weight_lb: weightLb });
   testBtn.disabled = false; testBtn.textContent = "🖨 Print Test Label (check printer)";
   if (result.ok && result.label_data) {
-    toast(`🖨 Test label sent to printer (void, tracking ${result.tracking_number})`, "success");
+    reportTestLabelResult(result);
     const bytes = Uint8Array.from(atob(result.label_data), c => c.charCodeAt(0));
     openAndPrintPdf(win, new Blob([bytes], { type: "application/pdf" }));
   } else {
     win?.close();
     toast(`Print test failed: ${result.error || "no label returned"}`, "error");
+  }
+}
+
+// Shared between Print Test Label and the Test Label confirm flow: this
+// carrier either issued a real free void label (voided === null — the
+// normal case), or didn't support that and a real label was bought and
+// voided instead (voided === true — refunded, per ShipStation's own docs),
+// or — worth a loud warning — bought but the void itself failed
+// (voided === false), meaning a real charge may still be sitting there.
+function reportTestLabelResult(result) {
+  if (result.voided === false) {
+    toast(`⚠️ Bought a real label (tracking ${result.tracking_number}) but couldn't void it — check ShipStation directly`, "error");
+  } else if (result.voided === true) {
+    toast(`🖨 Test label printed — bought for real and voided/refunded (tracking ${result.tracking_number})`, "success");
+  } else {
+    toast(`🖨 Test label printed (void, tracking ${result.tracking_number})`, "success");
   }
 }
 

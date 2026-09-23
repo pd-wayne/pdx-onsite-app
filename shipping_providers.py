@@ -60,7 +60,14 @@ class ShippingProviderAdapter:
     def create_label(self, external_order_id: str, carrier_code: str, service_code: str,
                      package_code: str, confirmation: str, ship_date: str,
                      weight_lb: float, test_label: bool = False) -> tuple:
-        """Returns (result, error). result: {tracking_number, shipment_cost, label_data}."""
+        """Returns (result, error). result: {tracking_number, shipment_cost,
+        label_data, shipment_id} — shipment_id is what void_label takes."""
+        raise NotImplementedError
+
+    def void_label(self, shipment_id) -> tuple:
+        """Voids a label bought in error or purely to test — refunds a
+        walleted carrier's balance (usually instantly; the carrier's own
+        policy governs the exact timing). Returns (voided: bool, error)."""
         raise NotImplementedError
 
     def list_carriers(self) -> tuple:
@@ -215,7 +222,16 @@ class ShipStationV1Adapter(ShippingProviderAdapter):
             "tracking_number": data.get("trackingNumber", ""),
             "shipment_cost": data.get("shipmentCost"),
             "label_data": data.get("labelData", ""),
+            "shipment_id": data.get("shipmentId"),
         }, ""
+
+    def void_label(self, shipment_id) -> tuple:
+        data, err = self._post("/shipments/voidlabel", {"shipmentId": int(shipment_id)})
+        if err:
+            return False, err
+        if data.get("approved"):
+            return True, ""
+        return False, data.get("message", "Void request was not approved")
 
     def list_carriers(self) -> tuple:
         data, err = self._get("/carriers", {})
