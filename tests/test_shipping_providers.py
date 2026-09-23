@@ -190,6 +190,52 @@ class TestShipStationV1CreateLabel:
         assert err == "ShipStation error: No package type has been selected."
 
 
+class TestShippingDebugLog:
+    """A small, capped record of failed ShipStation calls — the exact
+    request/response, not just a one-line message — so a real error is
+    diagnosable without hunting through the full Activity Log."""
+
+    def setup_method(self):
+        sp._debug_log.clear()
+
+    def test_failed_call_is_recorded(self, monkeypatch):
+        monkeypatch.setattr(requests, "post",
+                           lambda *a, **k: _FakeResponse({}, ok=False, status_code=422, text="Bad address"))
+        adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
+        adapter.create_order(SAMPLE_ORDER)
+
+        entries = sp.get_debug_log()
+        assert len(entries) == 1
+        assert entries[0]["path"] == "/orders/createorder"
+        assert entries[0]["request"]["orderNumber"] == "PDX001"
+        assert "422" in entries[0]["error"]
+
+    def test_successful_call_is_not_recorded(self, monkeypatch):
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse({"orderId": 555}))
+        adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
+        adapter.create_order(SAMPLE_ORDER)
+        assert sp.get_debug_log() == []
+
+    def test_connection_error_is_recorded(self, monkeypatch):
+        def raise_conn_error(*a, **k):
+            raise requests.exceptions.ConnectionError()
+        monkeypatch.setattr(requests, "post", raise_conn_error)
+        adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
+        adapter.create_order(SAMPLE_ORDER)
+
+        entries = sp.get_debug_log()
+        assert len(entries) == 1
+        assert "connection" in entries[0]["error"].lower()
+
+    def test_log_stays_capped(self, monkeypatch):
+        monkeypatch.setattr(requests, "post",
+                           lambda *a, **k: _FakeResponse({}, ok=False, status_code=500, text="fail"))
+        adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
+        for _ in range(10):
+            adapter.create_order(SAMPLE_ORDER)
+        assert len(sp.get_debug_log()) == sp._debug_log.maxlen
+
+
 class TestShipStationV1Discovery:
     def test_list_carriers(self, monkeypatch):
         adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})

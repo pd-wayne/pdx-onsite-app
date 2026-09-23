@@ -560,6 +560,8 @@ async function openDetail(orderNum) {
     btnMarkShipped.style.display = isPickupOrder ? "none" : "";
     btnMarkShipped.disabled = isConfirmed;
     btnMarkShipped.textContent = isConfirmed ? "📦 Shipped" : "📦 Mark Shipped";
+    const hint = document.getElementById("mark-shipped-hint");
+    if (hint) hint.style.display = isPickupOrder ? "none" : "";
   }
   // Print Label (reprint) — only once a real carrier label has actually been
   // bought and stored (Ready to Ship succeeded at some point for this order).
@@ -728,6 +730,8 @@ function showShipForm() {
   document.getElementById("btn-detail-mark-shipped").style.display = "none";
   document.getElementById("btn-detail-ready-to-ship").style.display = "none";
   document.getElementById("detail-ship-form").style.display = "block";
+  const hint = document.getElementById("mark-shipped-hint");
+  if (hint) hint.style.display = "none";
   _testLabelMode = false;
   updateConfirmShippedState();
 }
@@ -743,12 +747,16 @@ function hideShipForm() {
   if (markBtn) markBtn.style.display = "";
   const readyBtn = document.getElementById("btn-detail-ready-to-ship");
   if (readyBtn) readyBtn.style.display = "";
+  const hint = document.getElementById("mark-shipped-hint");
+  if (hint) hint.style.display = "";
 }
 
 function showReadyToShipForm() {
   document.getElementById("btn-detail-ready-to-ship").style.display = "none";
   const markBtn = document.getElementById("btn-detail-mark-shipped");
   if (markBtn) markBtn.style.display = "none";
+  const hint = document.getElementById("mark-shipped-hint");
+  if (hint) hint.style.display = "none";
   document.getElementById("ready-to-ship-weight").value = state.default_package_weight_lb || 0.1;
   document.getElementById("detail-ready-to-ship-form").style.display = "block";
 }
@@ -760,6 +768,8 @@ function hideReadyToShipForm() {
   if (btn) btn.style.display = "";
   const markBtn = document.getElementById("btn-detail-mark-shipped");
   if (markBtn) markBtn.style.display = "";
+  const hint = document.getElementById("mark-shipped-hint");
+  if (hint) hint.style.display = "";
 }
 
 // Confirm Shipped stays disabled until staff have actively picked a carrier
@@ -2123,6 +2133,40 @@ async function renderShippingProviders() {
   }
   wrap.innerHTML = providers.map(p => renderProviderCard(p)).join("");
   await Promise.all(providers.map(p => loadShippingOptionMappings(p.id)));
+}
+
+// A small, focused alternative to the full Activity Log for diagnosing a
+// ShipStation error — the last few failed requests with the exact payload
+// and response, capped server-side so this never grows into something too
+// big to read or paste.
+let _lastShippingDebugText = "";
+
+async function loadShippingDebugLog() {
+  const wrap = document.getElementById("shipping-debug-log");
+  const copyBtn = document.getElementById("btn-copy-shipping-debug");
+  wrap.textContent = "Loading…";
+  const entries = await apiGet("shipping_debug_log");
+  if (!entries.length) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px">No failed shipping requests recorded since the app started.</div>`;
+    copyBtn.style.display = "none";
+    return;
+  }
+  _lastShippingDebugText = entries.map(e =>
+    `[${e.time}] ${e.path}\nRequest: ${JSON.stringify(e.request)}\nError: ${e.error}` +
+    (e.response ? `\nResponse: ${e.response}` : "")
+  ).join("\n\n");
+  wrap.innerHTML = `<pre style="font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:10px;max-height:280px;overflow:auto">${esc(_lastShippingDebugText)}</pre>`;
+  copyBtn.style.display = "";
+}
+
+async function copyShippingDebugLog() {
+  if (!_lastShippingDebugText) return;
+  try {
+    await navigator.clipboard.writeText(_lastShippingDebugText);
+    toast("Copied", "success");
+  } catch (e) {
+    toast("Couldn't copy automatically — select the text above and copy manually", "error");
+  }
 }
 
 // Shows a non-secret credential (e.g. API Key) as first4••••last4 instead of

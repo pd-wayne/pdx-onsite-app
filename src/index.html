@@ -301,6 +301,12 @@
               <div class="form-hint">Pre-fills the weight shown on Ready to Ship — most orders are just prints. Staff can change it per-shipment before buying the label.</div>
             </div>
             <div id="shipping-providers-list"></div>
+            <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+              <div class="form-hint" style="margin-bottom:8px">Getting a confusing ShipStation error? This shows the last few failed requests in full, small enough to copy and send along instead of the whole Activity Log.</div>
+              <button class="btn-secondary" style="font-size:11px;padding:5px 12px" onclick="loadShippingDebugLog()">🔍 Show Last Shipping Errors</button>
+              <button class="btn-secondary" id="btn-copy-shipping-debug" style="font-size:11px;padding:5px 12px;display:none" onclick="copyShippingDebugLog()">📋 Copy</button>
+              <div id="shipping-debug-log" style="margin-top:10px"></div>
+            </div>
           </div>
         </div>
 
@@ -408,15 +414,19 @@
     <div id="detail-ready-to-ship-form" style="display:none">
       <label class="form-label" for="ready-to-ship-weight">Package Weight (lb)</label>
       <input class="form-input" id="ready-to-ship-weight" type="number" step="0.1" min="0.1" style="width:100%;margin-bottom:8px;box-sizing:border-box">
-      <div style="display:flex;gap:8px;margin-bottom:8px">
+      <div style="display:flex;gap:8px;margin-bottom:2px">
         <button class="btn-action btn-confirm" style="flex:1;margin:0" onclick="detailReadyToShip()">🚀 Buy Label</button>
         <button class="btn-action btn-reprint-img" style="flex:1;margin:0" onclick="hideReadyToShipForm()">Cancel</button>
       </div>
-      <button class="btn-action btn-reprint-img" id="btn-ready-to-ship-test" style="margin:0;width:100%;margin-bottom:8px" onclick="openTestLabelForm()">🧪 Test Label</button>
+      <div class="form-hint" style="margin:0 0 10px">Real order. Buys a paid label with a real tracking number and marks this order shipped.</div>
+      <button class="btn-action btn-reprint-img" id="btn-ready-to-ship-test" style="margin:0;width:100%" onclick="openTestLabelForm()">🧪 Test Label</button>
+      <div class="form-hint" style="margin:0 0 10px">Test order. Prints a free label and marks this order shipped with placeholder tracking (UPS / TEST1234) — no real label is bought.</div>
       <button class="btn-action btn-reprint-img" id="btn-ready-to-ship-print-test" style="margin:0;width:100%" onclick="printTestLabel()">🖨 Print Test Label (check printer)</button>
+      <div class="form-hint" style="margin:0">Printer check only. Doesn't touch this order or PhotoDay at all.</div>
     </div>
     <button class="btn-action btn-fulfill" id="btn-detail-print-label" onclick="detailPrintLabel()" style="display:none">🖨 Reprint Label</button>
     <button class="btn-action btn-fulfill" id="btn-detail-mark-shipped" onclick="showShipForm()" style="display:none">📦 Mark Shipped</button>
+    <div class="form-hint" id="mark-shipped-hint" style="display:none;margin:-4px 0 8px">Fallback for a real order when Ready to Ship doesn't work — enter the carrier and tracking number by hand.</div>
     <div id="detail-ship-form" style="display:none">
       <select class="form-select" id="ship-carrier" style="width:100%;margin-bottom:6px" onchange="onMarkShippedCarrierChange()">
         <option value="" selected>Select carrier…</option>

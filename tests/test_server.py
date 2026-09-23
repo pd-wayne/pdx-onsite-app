@@ -1006,6 +1006,21 @@ class TestShippingProviderEndpoints:
         assert resp.get_json()["ok"] is True
         assert client.get("/api/get_shipping_providers").get_json() == []
 
+    def test_debug_log_empty_by_default(self, client):
+        import shipping_providers as sp
+        sp._debug_log.clear()
+        assert client.get("/api/shipping_debug_log").get_json() == []
+
+    def test_debug_log_surfaces_recorded_failure(self, client):
+        import shipping_providers as sp
+        sp._debug_log.clear()
+        sp._record_failure("/orders/createorder", {"orderNumber": "X"}, "ShipStation error: The request is invalid.")
+        entries = client.get("/api/shipping_debug_log").get_json()
+        assert len(entries) == 1
+        assert entries[0]["path"] == "/orders/createorder"
+        assert entries[0]["request"] == {"orderNumber": "X"}
+        assert "invalid" in entries[0]["error"].lower()
+
     def _make_provider(self, client):
         return client.post("/api/save_shipping_provider", data=json.dumps({
             "provider_type": "shipstation", "label": "SS", "credentials": {"api_key": "k", "api_secret": "s"},

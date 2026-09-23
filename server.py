@@ -551,6 +551,13 @@ def create_app(poller, ui_path: str = "") -> Flask:
     def get_shipping_providers():
         return jsonify(db.get_shipping_providers())
 
+    @app.route("/api/shipping_debug_log")
+    def shipping_debug_log():
+        """The last few failed ShipStation calls, exact request+response —
+        small and focused enough to copy/paste when diagnosing a shipping
+        error, instead of hunting through the full Activity Log/Export Logs."""
+        return jsonify(shipping_providers.get_debug_log())
+
     @app.route("/api/save_shipping_provider", methods=["POST"])
     def save_shipping_provider():
         data = request.get_json() or {}

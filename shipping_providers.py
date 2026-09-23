@@ -10,10 +10,36 @@ provider-specific logic. Add a new provider by writing one adapter class and
 registering it in PROVIDER_ADAPTERS — nothing else needs to change.
 """
 import logging
+from collections import deque
+from datetime import datetime
 
 import requests
 
 log = logging.getLogger("pdx.shipping")
+
+# A small, dedicated record of the last few failed ShipStation calls — the
+# exact request body and response, not just a one-line error string. Kept
+# separate from the main Activity Log on purpose: that log is meant for
+# studio staff and grows unbounded, which makes it a bad place to hunt for
+# one technical error and a worse thing to paste into a support request.
+# This stays capped and small enough to copy/paste directly. See
+# /api/shipping_debug_log in server.py and the "Last Shipping Errors" button
+# in Settings → Shipping Providers.
+_debug_log: deque = deque(maxlen=6)
+
+
+def get_debug_log() -> list:
+    return list(_debug_log)
+
+
+def _record_failure(path: str, request_body: dict, error: str, response_text: str = ""):
+    _debug_log.append({
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "path": path,
+        "request": request_body,
+        "error": error,
+        "response": response_text[:500] if response_text else "",
+    })
 
 
 class ShippingProviderAdapter:
@@ -104,13 +130,18 @@ class ShipStationV1Adapter(ShippingProviderAdapter):
         try:
             resp = requests.post(f"{self.BASE_URL}{path}", auth=(api_key, api_secret), json=body, timeout=30)
         except requests.exceptions.ConnectionError:
+            _record_failure(path, body, "Connection error")
             return None, "Connection error"
         except requests.exceptions.Timeout:
+            _record_failure(path, body, "Request timed out")
             return None, "Request timed out"
         except Exception as e:
+            _record_failure(path, body, str(e))
             return None, str(e)
         if not resp.ok:
-            return None, self._format_error(resp)
+            err = self._format_error(resp)
+            _record_failure(path, body, err, resp.text)
+            return None, err
         return resp.json(), ""
 
     def create_order(self, order: dict) -> tuple:
