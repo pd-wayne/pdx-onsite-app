@@ -539,6 +539,14 @@ async function openDetail(orderNum) {
   btnConfirm.textContent = isConfirmed ? "✅ Confirmed" : "✅ Confirm Pickup";
   if (btnReprintRcpt) btnReprintRcpt.style.display = isPickupOrder ? "" : "none";
 
+  // Reset both forms (and the button visibility they toggle) BEFORE applying
+  // this order's real pickup/non-pickup visibility below — hideShipForm()
+  // unconditionally re-shows both buttons, which must not stick for a
+  // pickup order that should never show either one.
+  hideShipForm();
+  const readyToShipForm = document.getElementById("detail-ready-to-ship-form");
+  if (readyToShipForm) readyToShipForm.style.display = "none";
+
   // Ready to Ship (automated, via a configured shipping provider) and Mark
   // Shipped (manual entry) both apply to any non-pickup order — Ready to Ship
   // is the primary path, Mark Shipped is the fallback for anything it can't
@@ -556,9 +564,6 @@ async function openDetail(orderNum) {
   // Print Label (reprint) — only once a real carrier label has actually been
   // bought and stored (Ready to Ship succeeded at some point for this order).
   if (btnPrintLabel) btnPrintLabel.style.display = order.ship_label_data ? "" : "none";
-  hideShipForm();
-  const readyToShipForm = document.getElementById("detail-ready-to-ship-form");
-  if (readyToShipForm) readyToShipForm.style.display = "none";
 
   // Print Slip / Mark Printed only apply to in-studio orders, and stay clickable
   // even after being done so staff can reprint/re-mark if something goes wrong.
@@ -708,9 +713,23 @@ async function detailMarkSlipPrinted() {
   await openDetail(state.selectedOrder.order_num);
 }
 
+// The Ready-to-Ship and Mark-Shipped forms are mutually exclusive — only one
+// order-fulfillment path can be in progress at a time, so opening either one
+// hides the other's trigger button entirely (not just its own), and closing
+// either restores both buttons rather than leaving one stranded (a real bug:
+// Cancel used to leave "Mark Shipped" permanently missing until the whole
+// order detail panel was closed and reopened).
+// Set while the open ship-form was reached via Test Label rather than the
+// real Mark Shipped fallback — see detailMarkShipped(). Reset every time the
+// form opens so a plain Mark Shipped click never inherits a stale test flag.
+let _testLabelMode = false;
+
 function showShipForm() {
   document.getElementById("btn-detail-mark-shipped").style.display = "none";
+  document.getElementById("btn-detail-ready-to-ship").style.display = "none";
   document.getElementById("detail-ship-form").style.display = "block";
+  _testLabelMode = false;
+  updateConfirmShippedState();
 }
 
 function hideShipForm() {
@@ -718,11 +737,18 @@ function hideShipForm() {
   if (form) form.style.display = "none";
   document.getElementById("ship-tracking").value = "";
   document.getElementById("ship-tracking").disabled = false;
-  document.getElementById("ship-carrier").value = "UPS";
+  document.getElementById("ship-carrier").value = "";
+  _testLabelMode = false;
+  const markBtn = document.getElementById("btn-detail-mark-shipped");
+  if (markBtn) markBtn.style.display = "";
+  const readyBtn = document.getElementById("btn-detail-ready-to-ship");
+  if (readyBtn) readyBtn.style.display = "";
 }
 
 function showReadyToShipForm() {
   document.getElementById("btn-detail-ready-to-ship").style.display = "none";
+  const markBtn = document.getElementById("btn-detail-mark-shipped");
+  if (markBtn) markBtn.style.display = "none";
   document.getElementById("ready-to-ship-weight").value = state.default_package_weight_lb || 0.1;
   document.getElementById("detail-ready-to-ship-form").style.display = "block";
 }
@@ -732,6 +758,21 @@ function hideReadyToShipForm() {
   if (form) form.style.display = "none";
   const btn = document.getElementById("btn-detail-ready-to-ship");
   if (btn) btn.style.display = "";
+  const markBtn = document.getElementById("btn-detail-mark-shipped");
+  if (markBtn) markBtn.style.display = "";
+}
+
+// Confirm Shipped stays disabled until staff have actively picked a carrier
+// (the select starts blank — no default — so a click can't sail through
+// with an unintended carrier) and either entered a tracking number or picked
+// Hand Delivered, which never has one.
+function updateConfirmShippedState() {
+  const carrier = document.getElementById("ship-carrier")?.value || "";
+  const tracking = document.getElementById("ship-tracking")?.value.trim() || "";
+  const btn = document.getElementById("btn-confirm-shipped");
+  if (!btn) return;
+  const ready = carrier !== "" && (carrier === HAND_DELIVERED || tracking !== "");
+  btn.disabled = !ready;
 }
 
 function onMarkShippedCarrierChange() {
@@ -740,19 +781,38 @@ function onMarkShippedCarrierChange() {
   if (!trackingInput) return;
   trackingInput.disabled = isHandDelivered;
   if (isHandDelivered) trackingInput.value = "";
+  updateConfirmShippedState();
 }
 
 async function detailMarkShipped() {
   if (!state.selectedOrder) return;
+  const orderNum = state.selectedOrder.order_num;
   const carrier = document.getElementById("ship-carrier").value;
   const trackingNumber = document.getElementById("ship-tracking").value.trim();
   if (!trackingNumber && carrier !== HAND_DELIVERED) { toast("Tracking number is required", "error"); return; }
-  const result = await apiPost("mark_shipped", {
-    order_num: state.selectedOrder.order_num, carrier, tracking_number: trackingNumber
-  });
+
+  // Test Label still prints a real (void) label from ShipStation, same as
+  // Print Test Label — but whatever carrier/tracking that label actually
+  // comes back with is never sent to PDX; PDX always gets the placeholder
+  // values from this form (UPS/TEST1234 by default, editable) instead. If
+  // the print fails, stop here — nothing gets reported to PDX.
+  if (_testLabelMode) {
+    const weightLb = parseFloat(document.getElementById("ready-to-ship-weight")?.value) || state.default_package_weight_lb || 0.1;
+    const win = window.open("", "_blank"); // open synchronously on click, before any await
+    const printResult = await apiPost("test_ready_to_ship", { order_num: orderNum, weight_lb: weightLb });
+    if (!(printResult.ok && printResult.label_data)) {
+      win?.close();
+      toast(`Test label print failed: ${printResult.error || "no label returned"}`, "error");
+      return;
+    }
+    const bytes = Uint8Array.from(atob(printResult.label_data), c => c.charCodeAt(0));
+    openAndPrintPdf(win, new Blob([bytes], { type: "application/pdf" }));
+  }
+
+  const result = await apiPost("mark_shipped", { order_num: orderNum, carrier, tracking_number: trackingNumber });
   if (result.ok) {
-    toast(`📦 Marked shipped: ${state.selectedOrder.order_num}`, "success");
-    await openDetail(state.selectedOrder.order_num);
+    toast(`📦 Marked shipped: ${orderNum}`, "success");
+    await openDetail(orderNum);
   } else {
     toast(`Mark shipped failed: ${result.error}`, "error");
   }
@@ -794,23 +854,47 @@ async function printShippingLabel(orderNum) {
   openAndPrintPdf(win, await r.blob());
 }
 
-async function detailTestLabel() {
+// Test Label is a shortcut into the same Mark Shipped form/endpoint used by
+// the manual fallback — pre-filled with placeholder carrier/tracking so
+// staff can validate the whole "order shows Shipped in PDX" pipeline with a
+// single Confirm click, without buying a real (charged) label. Confirming
+// from here still prints a real void ShipStation label (see _testLabelMode
+// in detailMarkShipped) so staff also see a real label come out of the
+// printer — but PDX only ever hears the placeholder carrier/tracking typed
+// here, never the label's real one. It DOES report to PDX and marks the
+// order fulfilled, same as Mark Shipped — never use it on a real customer
+// order.
+function openTestLabelForm() {
+  document.getElementById("detail-ready-to-ship-form").style.display = "none";
+  showShipForm(); // resets _testLabelMode false — must set true after, not before
+  _testLabelMode = true;
+  document.getElementById("ship-carrier").value = "UPS";
+  document.getElementById("ship-tracking").value = "TEST1234";
+  onMarkShippedCarrierChange();
+}
+
+// Separate from Test Label above — this one is for checking the physical
+// printer, not PDX. It calls ShipStation for a real-but-void label (never
+// charged) using the order's actual mapping/weight, and opens/prints the
+// real PDF so staff can confirm a label actually comes out of the printer.
+// Never touches PDX or the local order status.
+async function printTestLabel() {
   if (!state.selectedOrder) return;
   const orderNum = state.selectedOrder.order_num;
   const weightLb = parseFloat(document.getElementById("ready-to-ship-weight").value);
   if (!(weightLb > 0)) { toast("Enter a package weight greater than 0", "error"); return; }
-  const testBtn = document.getElementById("btn-ready-to-ship-test");
+  const testBtn = document.getElementById("btn-ready-to-ship-print-test");
   const win = window.open("", "_blank"); // open synchronously on click, before any await
   testBtn.disabled = true; testBtn.textContent = "⏳ Creating test label…";
   const result = await apiPost("test_ready_to_ship", { order_num: orderNum, weight_lb: weightLb });
-  testBtn.disabled = false; testBtn.textContent = "🧪 Test Label (void, not reported to PDX)";
+  testBtn.disabled = false; testBtn.textContent = "🖨 Print Test Label (check printer)";
   if (result.ok && result.label_data) {
-    toast(`🧪 Test label created (void, tracking ${result.tracking_number}) — not reported to PDX`, "success");
+    toast(`🖨 Test label sent to printer (void, tracking ${result.tracking_number})`, "success");
     const bytes = Uint8Array.from(atob(result.label_data), c => c.charCodeAt(0));
     openAndPrintPdf(win, new Blob([bytes], { type: "application/pdf" }));
   } else {
     win?.close();
-    toast(`Test label failed: ${result.error || "no label returned"}`, "error");
+    toast(`Print test failed: ${result.error || "no label returned"}`, "error");
   }
 }
 
