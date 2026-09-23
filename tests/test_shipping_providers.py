@@ -87,6 +87,22 @@ class TestShipStationV1CreateOrder:
         assert external_id is None
         assert "orderId" in err
 
+    def test_full_country_name_is_normalized_to_iso_code(self, monkeypatch):
+        # Real case surfaced via the shipping-debug log: PDX sent "United
+        # States" instead of "US", and ShipStation rejected the whole order
+        # for it ("Please use a 2 character country code").
+        order = {**SAMPLE_ORDER, "destination": {**SAMPLE_ORDER["destination"], "country": "United States"}}
+        adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
+        captured = {}
+        def fake_post(url, auth, json, timeout):
+            captured.update(json)
+            return _FakeResponse({"orderId": 555})
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        external_id, err = adapter.create_order(order)
+        assert err == ""
+        assert captured["shipTo"]["country"] == "US"
+
     def test_http_error_returns_message(self, monkeypatch):
         adapter = sp.ShipStationV1Adapter({"api_key": "k", "api_secret": "s"})
         monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse({}, ok=False, status_code=422, text="Bad address"))
@@ -188,6 +204,24 @@ class TestShipStationV1CreateLabel:
         result, err = adapter.create_label("555", "stamps_com", "usps_priority_mail", "", "none", "2026-07-28", 0.1)
         assert result is None
         assert err == "ShipStation error: No package type has been selected."
+
+
+class TestNormalizeCountry:
+    def test_full_name_maps_to_code(self):
+        assert sp._normalize_country("United States") == "US"
+        assert sp._normalize_country("united states") == "US"
+        assert sp._normalize_country("Canada") == "CA"
+
+    def test_already_a_code_passes_through_uppercased(self):
+        assert sp._normalize_country("us") == "US"
+        assert sp._normalize_country("GB") == "GB"
+
+    def test_unrecognized_name_falls_back_to_us(self):
+        assert sp._normalize_country("Wakanda") == "US"
+
+    def test_missing_falls_back_to_us(self):
+        assert sp._normalize_country("") == "US"
+        assert sp._normalize_country(None) == "US"
 
 
 class TestShippingDebugLog:

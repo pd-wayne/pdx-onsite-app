@@ -77,6 +77,28 @@ class ShippingProviderAdapter:
         raise NotImplementedError
 
 
+# ShipStation requires a 2-letter ISO country code and rejects anything else
+# outright ("Please use a 2 character country code") — but PDX destinations
+# aren't guaranteed to already be codes (a real order surfaced this via the
+# new shipping-debug log: "United States" came through as the full name).
+# Covers the common full names a US-based studio's orders are realistically
+# going to see; anything unrecognized falls back to "US" rather than
+# guessing wrong, same as the pre-existing default for a missing country.
+_COUNTRY_CODES = {
+    "united states": "US", "united states of america": "US", "usa": "US", "us": "US",
+    "canada": "CA", "mexico": "MX",
+    "united kingdom": "GB", "great britain": "GB", "uk": "GB",
+    "australia": "AU", "new zealand": "NZ",
+}
+
+
+def _normalize_country(value: str) -> str:
+    value = (value or "").strip()
+    if len(value) == 2:
+        return value.upper()
+    return _COUNTRY_CODES.get(value.lower(), "US")
+
+
 class ShipStationV1Adapter(ShippingProviderAdapter):
     """ShipStation V1 — chosen over V2 for this integration because V1's Orders
     concept is what we push into directly (we control orderNumber ourselves),
@@ -160,7 +182,7 @@ class ShipStationV1Adapter(ShippingProviderAdapter):
                 "city": dest.get("city", ""),
                 "state": dest.get("state", ""),
                 "postalCode": dest.get("zipCode", ""),
-                "country": dest.get("country", "US"),
+                "country": _normalize_country(dest.get("country", "US")),
                 "phone": dest.get("phone", ""),
             },
         }
