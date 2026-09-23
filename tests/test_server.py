@@ -1484,6 +1484,26 @@ class TestReadyToShipTestMode:
         assert data["ok"] is False
         assert data["error"] == "carrier down"
 
+    def test_walleted_carrier_test_label_unsupported_gets_a_clear_explanation(self, client, monkeypatch):
+        # Real ShipStation platform limitation (confirmed against their own
+        # docs) — a "walleted" carrier (ShipStation's own included UPS/FedEx
+        # rates) can never issue a test label, only a carrier account the
+        # studio connected directly. This should read as "use Buy Label or
+        # Mark Shipped instead," not a raw ShipStation exception dump.
+        import shipping_providers as sp
+        db.upsert_order(self._order())
+        self._provider_with_mapping()
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_order", lambda self, order: ("TEST-999", ""))
+        monkeypatch.setattr(sp.ShipStationV1Adapter, "create_label",
+                           lambda self, *a, **k: (None, "ShipStation error: Test labels are not supported."))
+
+        resp = client.post("/api/test_ready_to_ship", data=json.dumps({"order_num": "ORD001"}), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "test labels" in data["error"].lower()
+        assert "buy label" in data["error"].lower()
+        assert "mark shipped" in data["error"].lower()
+
 
 # ── Multi-station (same-location, onsite-only) ────────────────────────────────
 # discovery.discover_stations and requests.post (the inter-station handoff

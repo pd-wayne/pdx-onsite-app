@@ -848,6 +848,18 @@ def create_app(poller, ui_path: str = "") -> Flask:
             weight_lb, test_label=True,
         )
         if err:
+            if "test labels are not supported" in err.lower():
+                # Real ShipStation platform limitation, not a bug here: a
+                # "walleted" carrier (ShipStation's own included UPS/FedEx
+                # rates, billed straight from the account balance) can never
+                # issue a void/test label — only a carrier account the
+                # studio connected directly supports that. Confirmed against
+                # ShipStation's own docs, not a guess.
+                return jsonify({"ok": False, "error":
+                               f"\"{mapping['carrier_code']}\" doesn't support test labels — this is a "
+                               f"ShipStation limitation for its own included carrier rates, not something "
+                               f"this app can work around. Use Buy Label for a real test instead, or Mark "
+                               f"Shipped to skip ShipStation entirely."})
             return jsonify({"ok": False, "error": err})
         return jsonify({
             "ok": True,
