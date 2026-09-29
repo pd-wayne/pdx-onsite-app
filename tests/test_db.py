@@ -408,6 +408,20 @@ class TestDestinations:
         assert dests[0]["name"] == "4x6 Printer"
         assert dests[0]["hot_folder_path"] == "C:\\Hot\\4x6"
         assert dests[0]["active"] == 1
+        # Existing destinations shouldn't suddenly change folder behavior —
+        # "flat" (today's long-standing default) unless explicitly set otherwise.
+        assert dests[0]["folder_mode"] == "flat"
+
+    def test_upsert_saves_job_folder_mode(self, fresh_db):
+        dest_id = db.upsert_destination("8x10 Printer", "C:\\Hot\\8x10", folder_mode="job")
+        dests = db.get_destinations()
+        assert dests[0]["id"] == dest_id
+        assert dests[0]["folder_mode"] == "job"
+
+    def test_upsert_with_id_updates_folder_mode(self, fresh_db):
+        dest_id = db.upsert_destination("8x10 Printer", "C:\\Hot\\8x10")
+        db.upsert_destination("8x10 Printer", "C:\\Hot\\8x10", dest_id=dest_id, folder_mode="job")
+        assert db.get_destinations()[0]["folder_mode"] == "job"
 
     def test_upsert_with_id_updates_existing(self, fresh_db):
         dest_id = db.upsert_destination("4x6 Printer", "C:\\Hot\\4x6")
@@ -661,6 +675,25 @@ class TestCheckOrderReady:
 # Backs the hot-folder consumption check: only 'queued' items (still sitting in
 # their hot folder, not yet confirmed printed) should surface here.
 
+class TestInsertOrderItemResolvedFolder:
+    def test_resolved_folder_is_stored_and_read_back(self, fresh_db, pickup_order):
+        dest_id = db.upsert_destination("A", "C:\\A", folder_mode="job")
+        db.upsert_order(pickup_order)
+        order = db.get_order("GS1777844776")
+        db.insert_order_item(order["id"], "img0.jpg", "8x24", dest_id,
+                             resolved_folder="C:\\A\\SomeJob")
+        items = db.get_order_items("GS1777844776")
+        assert items[0]["resolved_folder"] == "C:\\A\\SomeJob"
+
+    def test_resolved_folder_defaults_to_empty_string(self, fresh_db, pickup_order):
+        dest_id = db.upsert_destination("A", "C:\\A")
+        db.upsert_order(pickup_order)
+        order = db.get_order("GS1777844776")
+        db.insert_order_item(order["id"], "img0.jpg", "8x24", dest_id)
+        items = db.get_order_items("GS1777844776")
+        assert items[0]["resolved_folder"] == ""
+
+
 class TestGetPendingOrderItems:
     def _setup_order_with_items(self, fresh_db, pickup_order, n=2):
         dest_id = db.upsert_destination("A", "C:\\A")
@@ -694,6 +727,13 @@ class TestGetPendingOrderItems:
         order, item_ids, dest_id = self._setup_order_with_items(fresh_db, pickup_order, n=1)
         db.update_item_status(item_ids[0], "error")
         assert db.get_pending_order_items() == []
+
+    def test_includes_gallery_for_job_mode_folder_resolution(self, fresh_db, pickup_order):
+        # The print-detection check needs the order's gallery to look in the
+        # same per-job subfolder a "job" folder_mode destination downloaded to.
+        order, item_ids, dest_id = self._setup_order_with_items(fresh_db, pickup_order, n=1)
+        pending = db.get_pending_order_items()
+        assert pending[0]["gallery"] == order["gallery"]
 
 
 class TestResetOrderItemsToQueued:

@@ -481,6 +481,46 @@ def print_receipt(order: dict, printer_name: str, studio_name: str = "", logo_pa
 
 # ── Hot folder management ─────────────────────────────────────────────────────
 
+_INVALID_FOLDER_CHARS = '<>:"/\\|?*'
+# Windows reserves these as device names — a folder can't be created with any
+# of them as its exact name, on any drive, regardless of extension.
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def sanitize_folder_name(name: str) -> str:
+    """Makes a job/gallery name safe to use as a single Windows folder name.
+    Replaces (never deletes) characters the filesystem rejects — two jobs
+    that differ only by an invalid character, like "GT: Lions" and "GT
+    Lions", must not collapse onto the same folder and silently merge their
+    images, which is the entire point "job" folder_mode exists for. Also
+    renames the handful of names Windows reserves for devices (CON, PRN,
+    COM1, ...), which fail to create as a folder at all. Never returns empty
+    (an order with a blank gallery still needs somewhere to go)."""
+    cleaned = "".join("-" if c in _INVALID_FOLDER_CHARS else c for c in (name or "")).strip(" .")
+    if not cleaned:
+        return "Unassigned"
+    if cleaned.upper() in _WINDOWS_RESERVED_NAMES:
+        cleaned = f"{cleaned}_job"
+    return cleaned[:100]
+
+
+def resolve_destination_folder(hot_folder_path: str, folder_mode: str, gallery: str) -> str:
+    """Where images for this destination actually land: the destination root
+    unchanged ("flat", the long-standing default), or one subfolder per job
+    ("job") so orders from the same job batch together and different jobs
+    sharing a destination never mix. Used both when downloading and when
+    later checking whether a file has been consumed by the printer — the two
+    must always resolve the same path for a given destination+gallery, or
+    print-detection silently breaks."""
+    if folder_mode == "job":
+        return os.path.join(hot_folder_path, sanitize_folder_name(gallery))
+    return hot_folder_path
+
+
 def get_archive_folder(output_folder: str) -> str:
     return os.path.join(output_folder, "archive")
 
@@ -696,7 +736,7 @@ def get_image_path(filename: str, output_folder: str, order_num: str = "") -> Op
 # ── Packing slip (in-studio) ────────────────────────────────────────────────
 
 def locate_downloaded_image(filename: str, destinations: list, order_num: str = "",
-                            image_output_folder: str = "") -> Optional[str]:
+                            image_output_folder: str = "", gallery: str = "") -> Optional[str]:
     """Locate an image across every active destination's hot folder (and its
     archive) — same lookup `get_image_path` does for a single folder, generalized
     across the multi-destination routing system. Also checks the dropship/
@@ -704,9 +744,10 @@ def locate_downloaded_image(filename: str, destinations: list, order_num: str = 
     confirmed against two real PDX samples — and dropship images never land in
     a routed destination, only dropship/ORDER_NUM/."""
     for dest in destinations:
-        folder = dest.get("hot_folder_path", "")
-        if not dest.get("active", True) or not folder:
+        raw_folder = dest.get("hot_folder_path", "")
+        if not dest.get("active", True) or not raw_folder:
             continue
+        folder = resolve_destination_folder(raw_folder, dest.get("folder_mode"), gallery)
         path = get_image_path(filename, folder, order_num)
         if path:
             return path
@@ -911,7 +952,7 @@ def build_packing_slip_pages(order: dict, destinations: list, studio_name: str =
 
     parsed_items = _parse_packing_slip_items(order)
     thumb_paths = {
-        it["filename"]: locate_downloaded_image(it["filename"], destinations, order_num, image_output_folder)
+        it["filename"]: locate_downloaded_image(it["filename"], destinations, order_num, image_output_folder, gallery)
         for it in parsed_items if it.get("filename")
     }
 

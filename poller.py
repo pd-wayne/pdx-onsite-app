@@ -90,7 +90,16 @@ class Poller:
             dest = destinations.get(item["destination_id"])
             if not dest or not dest.get("hot_folder_path"):
                 continue
-            if not printer.file_still_in_hot_folder(item["filename"], dest["hot_folder_path"]):
+            # Use the folder this specific file was actually downloaded into,
+            # not a fresh resolve against the destination's *current* settings
+            # — if folder_mode or hot_folder_path gets edited in Settings while
+            # this item is still queued, re-deriving live would look in the
+            # wrong place and either falsely mark it printed or leave it
+            # stuck queued forever. Older items from before this column
+            # existed have no resolved_folder, so fall back to the flat root,
+            # which was the only place they could ever have landed.
+            folder = item.get("resolved_folder") or dest["hot_folder_path"]
+            if not printer.file_still_in_hot_folder(item["filename"], folder):
                 db.update_item_status(item["id"], "printed")
                 ready_orders.add(item["order_num"])
 
@@ -133,10 +142,12 @@ class Poller:
 
             new_count += 1
             order_num = order_data.get("num") or order_data.get("order_num")
-            gallery   = order_data.get("gallery", "")
-
-            order    = db.get_order(order_num)
-            job      = db.get_job(gallery) if gallery else None
+            order     = db.get_order(order_num)
+            # order.gallery is exactly what upsert_order just wrote from
+            # order_data above — read it back from the one canonical row
+            # instead of keeping a second, independently-derived copy.
+            gallery   = order["gallery"] if order else order_data.get("gallery", "")
+            job       = db.get_job(gallery) if gallery else None
             job_mode   = job["fulfillment_mode"] if job else cfg.get("app_mode", "onsite")
             order_mode = order["fulfillment_mode"] if order else "pickup"
 
@@ -159,7 +170,7 @@ class Poller:
                     order_id = order["id"] if order else None
                     t = threading.Thread(
                         target=self._download_images,
-                        args=(order_num, order_id, images, api_key),
+                        args=(order_num, order_id, images, api_key, gallery),
                         daemon=True
                     )
                     t.start()
@@ -223,7 +234,7 @@ class Poller:
         except Exception as e:
             log.error(f"[Poller] Receipt exception for {order_num}: {e}")
 
-    def _download_images(self, order_num: str, order_id, images: list, api_key: str):
+    def _download_images(self, order_num: str, order_id, images: list, api_key: str, gallery: str = ""):
         if not images:
             log.warning(f"[Download] No images for {order_num}")
             if self.on_download_done:
@@ -259,17 +270,23 @@ class Poller:
         for dest_id, img_dest_list in groups.items():
             dest   = img_dest_list[0][1]
             imgs   = [p[0] for p in img_dest_list]
-            folder = dest["hot_folder_path"]
 
-            if not folder:
+            if not dest["hot_folder_path"]:
                 log.warning(f"[Download] Destination '{dest['name']}' has no path — skipping {len(imgs)} image(s)")
                 continue
 
-            # Create order_items rows before attempting download
+            folder = printer.resolve_destination_folder(
+                dest["hot_folder_path"], dest.get("folder_mode"), gallery)
+
+            # Create order_items rows before attempting download — resolved_folder
+            # snapshots exactly where this download call is about to put the
+            # file, so later steps (print-detection, reprint, archive) always
+            # agree on the location even if the destination's settings change.
             if order_id is not None:
                 for img in imgs:
                     item_id = db.insert_order_item(
-                        order_id, img["filename"], img.get("print_spec", ""), dest_id
+                        order_id, img["filename"], img.get("print_spec", ""), dest_id,
+                        resolved_folder=folder,
                     )
                     item_ids_by_dest[dest_id].append(item_id)
 

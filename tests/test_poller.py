@@ -235,6 +235,69 @@ class TestDropshipImageDownload:
         assert results == [("DS002", True, "")]
 
 
+# ── Routed download folder resolution (flat vs. job-based destinations) ────────
+# Real customer request (Bassetti Photo, Sep 2026): a "job" folder_mode
+# destination should group every order's images into one shared per-job
+# subfolder, so staff batch-printing by hand don't have to open a folder per
+# order — while a "flat" destination (the long-standing default) is unchanged.
+
+class TestRoutedDownloadFolderMode:
+    def _setup(self, monkeypatch, tmp_path, folder_mode):
+        captured = {}
+
+        def fake_download_images(images, folder, order_num="", api_key=""):
+            captured["folder"] = folder
+            return True, ""
+
+        monkeypatch.setattr(printer, "download_images", fake_download_images)
+        hot_folder = str(tmp_path / "Hot")
+        db.upsert_destination("8x10 Printer", hot_folder, is_default=True, folder_mode=folder_mode)
+        db.upsert_order(PICKUP)
+        order = db.get_order("T-001")
+        return captured, hot_folder, order
+
+    def test_flat_destination_downloads_to_root_unchanged(self, monkeypatch, tmp_path):
+        captured, hot_folder, order = self._setup(monkeypatch, tmp_path, "flat")
+        p = poller_module.Poller()
+        images = [{"filename": "a.jpg", "assetUrl": "https://example.com/a.jpg", "print_spec": "8x10"}]
+        p._download_images("T-001", order["id"], images, api_key="fake", gallery="g1")
+        assert captured["folder"] == hot_folder
+
+    def test_job_destination_downloads_into_gallery_subfolder(self, monkeypatch, tmp_path):
+        captured, hot_folder, order = self._setup(monkeypatch, tmp_path, "job")
+        p = poller_module.Poller()
+        images = [{"filename": "a.jpg", "assetUrl": "https://example.com/a.jpg", "print_spec": "8x10"}]
+        p._download_images("T-001", order["id"], images, api_key="fake", gallery="g1")
+        assert captured["folder"] == os.path.join(hot_folder, "g1")
+
+    def test_job_destination_two_orders_same_gallery_share_the_subfolder(self, monkeypatch, tmp_path):
+        # The whole point: multiple orders from the same job land together.
+        captured, hot_folder, order = self._setup(monkeypatch, tmp_path, "job")
+        db.upsert_order(ECONOMY)  # also gallery "g1"
+        order2 = db.get_order("T-002")
+        p = poller_module.Poller()
+        images = [{"filename": "a.jpg", "assetUrl": "https://example.com/a.jpg", "print_spec": "8x10"}]
+
+        p._download_images("T-001", order["id"], images, api_key="fake", gallery="g1")
+        first_folder = captured["folder"]
+        p._download_images("T-002", order2["id"], images, api_key="fake", gallery="g1")
+        second_folder = captured["folder"]
+
+        assert first_folder == second_folder == os.path.join(hot_folder, "g1")
+
+    def test_resolved_folder_is_snapshotted_onto_the_order_item(self, monkeypatch, tmp_path):
+        # This snapshot is what later lets print-detection, reprint, and
+        # archive all agree on where a file actually is, even if the
+        # destination's settings change afterward (see test_poller.py's
+        # TestCheckPendingPrints for the failure this prevents).
+        captured, hot_folder, order = self._setup(monkeypatch, tmp_path, "job")
+        p = poller_module.Poller()
+        images = [{"filename": "a.jpg", "assetUrl": "https://example.com/a.jpg", "print_spec": "8x10"}]
+        p._download_images("T-001", order["id"], images, api_key="fake", gallery="g1")
+        items = db.get_order_items("T-001")
+        assert items[0]["resolved_folder"] == os.path.join(hot_folder, "g1")
+
+
 class TestPrintReceipt:
     """_print_receipt reads back the just-upserted DB row instead of rebuilding
     a parallel dict from the raw poll payload — this is also exactly what a
@@ -424,6 +487,62 @@ class TestCheckPendingPrints:
         p._check_pending_prints()  # should not raise
 
         assert db.get_order_items(pickup_order["num"])[0]["status"] == "queued"
+
+    def test_job_mode_destination_checks_the_gallery_subfolder_not_the_root(self, pickup_order, tmp_path):
+        # pickup_order's gallery is "iNationals 2026" — must be checked in
+        # hot_folder/iNationals 2026/, not hot_folder/, or this silently marks
+        # everything "printed" the instant it downloads (file never found at
+        # the root) instead of waiting for the real consume-by-printer signal.
+        hot_folder = str(tmp_path / "Hot")
+        job_folder = os.path.join(hot_folder, "iNationals 2026")
+        os.makedirs(job_folder, exist_ok=True)
+        dest_id = db.upsert_destination("A", hot_folder, is_default=True, folder_mode="job")
+        db.upsert_order(pickup_order)
+        order = db.get_order(pickup_order["num"])
+        open(os.path.join(job_folder, "img0.jpg"), "wb").close()
+        db.insert_order_item(order["id"], "img0.jpg", "8x24", dest_id, resolved_folder=job_folder)
+
+        ready_calls = []
+        p = poller_module.Poller(on_order_ready=lambda num: ready_calls.append(num))
+        p._check_pending_prints()
+        assert db.get_order_items(pickup_order["num"])[0]["status"] == "queued"
+        assert ready_calls == []
+
+        os.remove(os.path.join(job_folder, "img0.jpg"))  # printer consumes it
+        p._check_pending_prints()
+        assert db.get_order_items(pickup_order["num"])[0]["status"] == "printed"
+        assert ready_calls == [pickup_order["num"]]
+
+    def test_check_uses_the_folder_the_file_was_actually_downloaded_into_even_if_destination_later_changes(
+        self, pickup_order, tmp_path
+    ):
+        # The exact bug this snapshot exists to prevent: an item downloaded
+        # while its destination was "flat" must still be checked at the flat
+        # root even if staff switch that destination to "job" mode (or edit
+        # its path) before the file is consumed — re-deriving live from the
+        # destination's *current* settings would look in the wrong place and
+        # falsely mark it printed/ready.
+        hot_folder = str(tmp_path / "Hot")
+        os.makedirs(hot_folder, exist_ok=True)
+        dest_id = db.upsert_destination("A", hot_folder, is_default=True, folder_mode="flat")
+        db.upsert_order(pickup_order)
+        order = db.get_order(pickup_order["num"])
+        open(os.path.join(hot_folder, "img0.jpg"), "wb").close()
+        # resolved_folder snapshots what "flat" resolved to at download time —
+        # exactly what poller._download_images itself would have stored.
+        db.insert_order_item(order["id"], "img0.jpg", "8x24", dest_id, resolved_folder=hot_folder)
+
+        # Now switch the destination to "job" mode, as if from Settings.
+        db.upsert_destination("A", hot_folder, dest_id=dest_id, folder_mode="job")
+
+        ready_calls = []
+        p = poller_module.Poller(on_order_ready=lambda num: ready_calls.append(num))
+        p._check_pending_prints()
+        # File is still sitting at the flat root — must still read as "not yet
+        # consumed," not incorrectly promoted just because the destination's
+        # mode changed underneath it.
+        assert db.get_order_items(pickup_order["num"])[0]["status"] == "queued"
+        assert ready_calls == []
 
 
 # ── Ingestion-time shipping-provider order creation ──────────────────────────

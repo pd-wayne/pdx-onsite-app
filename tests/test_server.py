@@ -142,6 +142,41 @@ class _FakeTkRoot:
 
 # ── Primary destination naming ─────────────────────────────────────────────────
 
+class TestSaveDestinationFolderMode:
+    def test_defaults_to_flat_when_omitted(self, client):
+        resp = client.post("/api/save_destination", data=json.dumps({
+            "name": "8x10 Printer", "hot_folder_path": "C:\\Hot",
+        }), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert db.get_destinations()[0]["folder_mode"] == "flat"
+
+    def test_saves_job_mode(self, client):
+        resp = client.post("/api/save_destination", data=json.dumps({
+            "name": "8x10 Printer", "hot_folder_path": "C:\\Hot", "folder_mode": "job",
+        }), content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert db.get_destinations()[0]["folder_mode"] == "job"
+
+    def test_rejects_invalid_folder_mode(self, client):
+        resp = client.post("/api/save_destination", data=json.dumps({
+            "name": "8x10 Printer", "hot_folder_path": "C:\\Hot", "folder_mode": "per_order",
+        }), content_type="application/json")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert "folder_mode" in data["error"]
+        assert db.get_destinations() == []
+
+    def test_null_body_returns_graceful_json_error_not_a_500(self, client):
+        # Real regression: folder_mode validation used to read data.get(...)
+        # before the try/except that turns bad input into a JSON error — a
+        # literal `null` body is valid JSON (request.get_json() returns None,
+        # doesn't raise), so it slipped past that guard into an unhandled
+        # AttributeError instead of this endpoint's normal error contract.
+        resp = client.post("/api/save_destination", data="null", content_type="application/json")
+        assert resp.status_code == 200
+        assert resp.get_json()["ok"] is False
+
+
 class TestSetPrimaryDestinationName:
     def test_seeds_and_names_when_none_exist(self, client):
         config.save({"image_output_folder": "C:\\Hot"})
@@ -554,6 +589,53 @@ class TestOrderActions:
         assert resp.get_json()["ok"] is False
 
 
+class TestFulfillOrderAutoModeArchive:
+    """Auto print_mode's "Send to Printer" archives files the poller already
+    auto-downloaded — it must look for them wherever they actually landed
+    (a "job" folder_mode destination's per-job subfolder), not just the flat
+    legacy image_output_folder. Getting this wrong doesn't error: it silently
+    marks the order fulfilled while leaving the real image un-archived."""
+
+    def test_archives_from_the_resolved_folder_not_the_global_output_folder(self, client, pickup_order, monkeypatch):
+        config.save({"image_output_folder": "C:\\WrongGlobalFolder", "print_mode": "auto"})
+        db.upsert_order(pickup_order)
+        order = db.get_order(pickup_order["num"])
+        dest_id = db.upsert_destination("A", "C:\\Hot", folder_mode="job")
+        filename = pickup_order["items"][0]["images"][0]["filename"]
+        db.insert_order_item(order["id"], filename, "8x24", dest_id,
+                             resolved_folder="C:\\Hot\\SomeJob")
+
+        import printer as _printer
+        captured = {}
+        monkeypatch.setattr(_printer, "fulfill_to_hot_folder",
+                           lambda images, folder, order_num="": (captured.update(folder=folder), (True, ""))[1])
+
+        resp = client.post("/api/fulfill_order",
+                           data=json.dumps({"order_num": order["order_num"]}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert captured["folder"] == "C:\\Hot\\SomeJob"
+
+    def test_falls_back_to_global_folder_for_items_with_no_resolved_folder(self, client, pickup_order, monkeypatch):
+        config.save({"image_output_folder": "C:\\Legacy", "print_mode": "auto"})
+        db.upsert_order(pickup_order)
+        order = db.get_order(pickup_order["num"])
+        dest_id = db.upsert_destination("A", "C:\\Legacy")
+        filename = pickup_order["items"][0]["images"][0]["filename"]
+        db.insert_order_item(order["id"], filename, "8x24", dest_id)  # no resolved_folder
+
+        import printer as _printer
+        captured = {}
+        monkeypatch.setattr(_printer, "fulfill_to_hot_folder",
+                           lambda images, folder, order_num="": (captured.update(folder=folder), (True, ""))[1])
+
+        resp = client.post("/api/fulfill_order",
+                           data=json.dumps({"order_num": order["order_num"]}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert captured["folder"] == "C:\\Legacy"
+
+
 class TestMarkShipped:
     def test_rejects_invalid_carrier(self, client):
         resp = client.post("/api/mark_shipped",
@@ -695,6 +777,51 @@ class TestReprintImagesResetsStatus:
         item_id = db.insert_order_item(order["id"], filename, "8x24", dest_id)
         db.update_item_status(item_id, "error")
         return order, item_id, filename
+
+    def test_reprint_uses_the_resolved_folder_not_the_global_output_folder(self, client, app, pickup_order, monkeypatch):
+        # Real gap found in review: reprint used to always write to
+        # cfg.image_output_folder, ignoring a "job" folder_mode destination's
+        # actual per-job subfolder entirely — silently dropping the reprint
+        # somewhere DNP wasn't watching, or mixing it into whatever other job
+        # happens to be running.
+        config.save({"image_output_folder": "C:\\WrongGlobalFolder"})
+        db.upsert_order(pickup_order)
+        order = db.get_order(pickup_order["num"])
+        dest_id = db.upsert_destination("A", "C:\\Hot", folder_mode="job")
+        filename = pickup_order["items"][0]["images"][0]["filename"]
+        db.insert_order_item(order["id"], filename, "8x24", dest_id,
+                             resolved_folder="C:\\Hot\\SomeJob")
+
+        import printer as _printer
+        captured = {}
+        monkeypatch.setattr(_printer, "reprint_images_to_hot_folder",
+                           lambda images, folder, order_num="": (captured.update(folder=folder), (True, ""))[1])
+
+        resp = client.post("/api/reprint_images",
+                           data=json.dumps({"order_num": order["order_num"]}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert captured["folder"] == "C:\\Hot\\SomeJob"
+
+    def test_reprint_falls_back_to_global_folder_for_items_with_no_resolved_folder(
+        self, client, app, pickup_order, monkeypatch
+    ):
+        # Backward compatibility: an order_item from before this column
+        # existed (resolved_folder is empty) must still reprint somewhere,
+        # not silently vanish — the prior single-folder behavior.
+        config.save({"image_output_folder": "C:\\Legacy"})
+        order, item_id, filename = self._setup_order(pickup_order)  # no resolved_folder set
+
+        import printer as _printer
+        captured = {}
+        monkeypatch.setattr(_printer, "reprint_images_to_hot_folder",
+                           lambda images, folder, order_num="": (captured.update(folder=folder), (True, ""))[1])
+
+        resp = client.post("/api/reprint_images",
+                           data=json.dumps({"order_num": order["order_num"]}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert captured["folder"] == "C:\\Legacy"
 
     def test_reprint_resets_item_to_queued(self, client, app, pickup_order, monkeypatch):
         order, item_id, filename = self._setup_order(pickup_order)

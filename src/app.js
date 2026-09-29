@@ -1908,6 +1908,10 @@ function renderDestinations() {
       <input class="form-input" style="width:130px;flex-shrink:0" id="dest-name-${d.id}" value="${esc(d.name)}" placeholder="Name" oninput="markDestDirty(${d.id})">
       <input class="form-input mono" style="flex:1;min-width:0" id="dest-path-${d.id}" value="${esc(d.hot_folder_path)}" placeholder="C:\\Hot Folder\\Path" oninput="markDestDirty(${d.id})">
       <button class="btn-xs btn-xs-ghost" onclick="browseDestFolder(${d.id})">…</button>
+      <select class="form-select" style="width:auto;flex-shrink:0;font-size:11px;padding:3px 6px" id="dest-folder-mode-${d.id}" onchange="markDestDirty(${d.id})" title="Flat: every order's images land together in this folder. By Job: each job gets its own subfolder, so images from different jobs never mix.">
+        <option value="flat" ${d.folder_mode !== "job" ? "selected" : ""}>Flat</option>
+        <option value="job" ${d.folder_mode === "job" ? "selected" : ""}>By Job</option>
+      </select>
       <label class="dest-default-label" title="Use as fallback for unmapped products">
         <input type="radio" name="dest-default" value="${d.id}" ${d.is_default ? "checked" : ""} onchange="markAllDestsDirty()"> Default
       </label>
@@ -1945,6 +1949,10 @@ function addDestination() {
     <input class="form-input" style="width:130px;flex-shrink:0" id="dest-name-new" value="${esc(nextName)}" placeholder="Name (e.g. 8x10)">
     <input class="form-input mono" style="flex:1;min-width:0" id="dest-path-new" placeholder="C:\\Hot Folder\\Path">
     <button class="btn-xs btn-xs-ghost" onclick="browseDestFolder('new')">…</button>
+    <select class="form-select" style="width:auto;flex-shrink:0;font-size:11px;padding:3px 6px" id="dest-folder-mode-new" title="Flat: every order's images land together in this folder. By Job: each job gets its own subfolder, so images from different jobs never mix.">
+      <option value="flat" selected>Flat</option>
+      <option value="job">By Job</option>
+    </select>
     <label class="dest-default-label">
       <input type="radio" name="dest-default" value="new"> Default
     </label>
@@ -1961,8 +1969,9 @@ async function saveDestination(id) {
   const name = document.getElementById(`dest-name-${id}`)?.value.trim();
   const path = document.getElementById(`dest-path-${id}`)?.value.trim();
   const isDefault = document.querySelector(`input[name="dest-default"][value="${id}"]`)?.checked || false;
+  const folderMode = document.getElementById(`dest-folder-mode-${id}`)?.value || "flat";
   if (!name || !path) { toast("Name and path are required", "error"); return; }
-  const payload = { name, hot_folder_path: path, is_default: isDefault, active: true };
+  const payload = { name, hot_folder_path: path, is_default: isDefault, active: true, folder_mode: folderMode };
   if (!isNew) payload.id = id; // omitted for a new row so the backend inserts instead of updating
   const result = await apiPost("save_destination", payload);
   if (result.ok) {
