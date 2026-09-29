@@ -660,13 +660,47 @@ class TestFulfillOrderAutoModeArchive:
         assert resp.get_json()["ok"] is True
         assert captured["folder"] == "C:\\Hot\\SomeJob"
 
-    def test_falls_back_to_global_folder_for_items_with_no_resolved_folder(self, client, pickup_order, monkeypatch):
+    def test_no_resolved_folder_re_routes_live_instead_of_using_global_folder(self, client, pickup_order, monkeypatch):
+        """Real bug report (Bassetti Photo, 2026-09-29): reprinting/archiving
+        an order downloaded before resolved_folder existed used to fall back
+        to the single legacy image_output_folder — which for any studio with
+        more than one destination is almost never where a printer is actually
+        watching, so the reprint silently went nowhere useful. It must
+        instead re-derive the item's CURRENT destination from live product
+        routing, same as a fresh download would."""
         config.save({"image_output_folder": "C:\\Legacy", "print_mode": "auto"})
         db.upsert_order(pickup_order)
         order = db.get_order(pickup_order["num"])
-        dest_id = db.upsert_destination("A", "C:\\Legacy")
+        dest_id = db.upsert_destination("A", "C:\\RealDestination")
+        db.upsert_routing("8x24", dest_id)
         filename = pickup_order["items"][0]["images"][0]["filename"]
         db.insert_order_item(order["id"], filename, "8x24", dest_id)  # no resolved_folder
+
+        import printer as _printer
+        captured = {}
+        monkeypatch.setattr(_printer, "fulfill_to_hot_folder",
+                           lambda images, folder, order_num="": (captured.update(folder=folder), (True, ""))[1])
+
+        resp = client.post("/api/fulfill_order",
+                           data=json.dumps({"order_num": order["order_num"]}),
+                           content_type="application/json")
+        assert resp.get_json()["ok"] is True
+        assert captured["folder"] == "C:\\RealDestination"
+
+    def test_falls_back_to_global_folder_only_when_routing_cannot_resolve_at_all(
+        self, client, pickup_order, monkeypatch
+    ):
+        """True last resort: the destination this item was originally routed
+        to no longer exists/is inactive and nothing else is active either, so
+        live routing has nothing to resolve to — the old single-folder
+        behavior is the only option left."""
+        config.save({"image_output_folder": "C:\\Legacy", "print_mode": "auto"})
+        db.upsert_order(pickup_order)
+        order = db.get_order(pickup_order["num"])
+        dest_id = db.upsert_destination("A", "C:\\RealDestination")
+        filename = pickup_order["items"][0]["images"][0]["filename"]
+        db.insert_order_item(order["id"], filename, "8x24", dest_id)  # no resolved_folder
+        db.upsert_destination("A", "C:\\RealDestination", dest_id=dest_id, active=False)
 
         import printer as _printer
         captured = {}
@@ -847,14 +881,18 @@ class TestReprintImagesResetsStatus:
         assert resp.get_json()["ok"] is True
         assert captured["folder"] == "C:\\Hot\\SomeJob"
 
-    def test_reprint_falls_back_to_global_folder_for_items_with_no_resolved_folder(
+    def test_reprint_with_no_resolved_folder_re_routes_live_instead_of_global_folder(
         self, client, app, pickup_order, monkeypatch
     ):
-        # Backward compatibility: an order_item from before this column
-        # existed (resolved_folder is empty) must still reprint somewhere,
-        # not silently vanish — the prior single-folder behavior.
+        """Real bug report (Bassetti Photo, 2026-09-29): reprinting an order
+        downloaded before resolved_folder existed used to fall back to the
+        single legacy image_output_folder — almost never where a studio with
+        more than one destination is actually watching — instead of
+        re-deriving the item's CURRENT destination from live product
+        routing, same as _setup_order's real destination ("C:\\A")."""
         config.save({"image_output_folder": "C:\\Legacy"})
         order, item_id, filename = self._setup_order(pickup_order)  # no resolved_folder set
+        db.upsert_routing("8x24", db.get_default_destination()["id"])
 
         import printer as _printer
         captured = {}
@@ -865,7 +903,7 @@ class TestReprintImagesResetsStatus:
                            data=json.dumps({"order_num": order["order_num"]}),
                            content_type="application/json")
         assert resp.get_json()["ok"] is True
-        assert captured["folder"] == "C:\\Legacy"
+        assert captured["folder"] == "C:\\A"
 
     def test_reprint_resets_item_to_queued(self, client, app, pickup_order, monkeypatch):
         order, item_id, filename = self._setup_order(pickup_order)

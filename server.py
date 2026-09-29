@@ -123,16 +123,33 @@ def _group_images_by_resolved_folder(order_num: str, images: list, fallback_fold
     folder — a "job" folder_mode destination puts different images from the
     same order in different job subfolders only when different print specs
     route to different destinations, but always keeps them out of the flat
-    legacy folder reprint/archive used to assume everything lived in. Images
-    with no matching order_item (or predating the resolved_folder column)
-    fall back to fallback_folder, the prior single-folder behavior."""
+    legacy folder reprint/archive used to assume everything lived in.
+
+    An image with no matching order_item — or one whose row predates the
+    resolved_folder column (added 2026-09-29) — re-derives its CURRENT
+    destination live from product routing instead of guessing at
+    fallback_folder. fallback_folder (the old single global
+    image_output_folder) is almost never where a studio's per-product
+    destinations actually watch once they've set up more than one — using it
+    for an old order silently sends the reprint/archive somewhere no printer
+    is watching. fallback_folder is now only a last resort, for the rare case
+    routing itself can't resolve a destination at all (no destinations
+    configured)."""
+    order = db.get_order(order_num)
+    gallery = order["gallery"] if order else ""
     folder_by_filename = {
         item["filename"]: item.get("resolved_folder")
         for item in db.get_order_items(order_num)
     }
     groups = defaultdict(list)
     for img in images:
-        folder = folder_by_filename.get(img.get("filename")) or fallback_folder
+        folder = folder_by_filename.get(img.get("filename"))
+        if not folder:
+            dest = db.get_destination_for_spec(img.get("print_spec", ""))
+            folder = (
+                printer.resolve_destination_folder(dest["hot_folder_path"], dest.get("folder_mode"), gallery)
+                if dest else fallback_folder
+            )
         groups[folder].append(img)
     return groups
 
