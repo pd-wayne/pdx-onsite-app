@@ -205,6 +205,18 @@ def get_activity_log_all() -> list:
 
 # ── Orders ────────────────────────────────────────────────────────────────────
 
+def spec_for_item(item: dict) -> str:
+    """The print_spec/routing key for one raw PDX order item — always the
+    item's own externalId (the real PDX product SKU), never each image's.
+    An image's externalId only encodes the photo's crop/print size and
+    collides across unrelated products that share a size — a plain "5x7
+    Print" and a "5x7 Hardboard Easel Panel" both image-tag as "5x7", so
+    routing/discovery/packing-slip labeling must all key on the item.
+    Shared by upsert_order (below), server.discover_specs_endpoint, and
+    printer._raw_items_to_slip_rows so the rule lives in exactly one place."""
+    return item.get("externalId", "")
+
+
 def upsert_order(order_data: dict) -> bool:
     """Insert order if not already seen. Returns True if new."""
     order_num = order_data.get("num") or order_data.get("order_num")
@@ -236,9 +248,11 @@ def upsert_order(order_data: dict) -> bool:
         item_images = item.get("images", [])
         image_count = len(item_images) if item_images else item.get("quantity", 1)
         qty = item.get("quantity", 1)
+        item_sku  = spec_for_item(item)
+        item_desc = item.get("description", "")
         items_summary.append({
-            "sku":   item.get("externalId", ""),
-            "desc":  item.get("description", ""),
+            "sku":   item_sku,
+            "desc":  item_desc,
             "qty":   qty,
             "files": image_count,
         })
@@ -249,11 +263,11 @@ def upsert_order(order_data: dict) -> bool:
                 images.append({
                     "filename":   filename,
                     "assetUrl":   asset_url,
-                    "item_sku":   item.get("externalId", ""),
+                    "item_sku":   item_sku,
                     "item_idx":   idx,
                     "item_qty":   qty,
-                    "item_desc":  item.get("description", ""),
-                    "print_spec": img.get("externalId", ""),
+                    "item_desc":  item_desc,
+                    "print_spec": item_sku,
                 })
 
     pdx_status = order_data.get("status", "received").lower()

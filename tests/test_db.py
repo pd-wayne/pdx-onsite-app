@@ -102,6 +102,41 @@ class TestUpsertOrder:
         assert len(images) == 1
         assert images[0]["filename"] == "40066_AN1A0007_1-ec808278.jpg"
 
+    def test_print_spec_keys_on_item_externalid_not_image_externalid(self, fresh_db):
+        """Regression test for the real Bassetti Photo bug report (order
+        FS1790612839): a plain "5x7 Print" and a "5x7 Hardboard Easel Panel"
+        both tag their image with the same crop-size externalId ("5x7"), which
+        used to collide them onto one print_spec and make the Hardboard
+        product unroutable/undiscoverable. The item's own externalId ("57EP")
+        is the real, distinct PDX product SKU."""
+        hardboard_order = {
+            "num": "FS1790612839", "gallery": "GT Lions 2026", "placedAt": "2026-09-28T16:28:22.257Z",
+            "items": [{
+                "externalId": "57EP", "description": "5x7 Hardboard Easel Panel",
+                "images": [{"assetUrl": "https://x/a.jpg", "filename": "GT1_2438-45abc47b.jpg",
+                            "externalId": "5x7", "orientation": "vertical"}],
+            }],
+            "shipping": {"option": {"externalId": "pdx_economy"},
+                         "destination": {"recipient": "Amanda Simone"}},
+        }
+        plain_print_order = {
+            "num": "FS0000000001", "gallery": "GT Lions 2026", "placedAt": "2026-09-28T16:28:22.257Z",
+            "items": [{
+                "externalId": "5x7prt", "description": "5x7 Print",
+                "images": [{"assetUrl": "https://x/b.jpg", "filename": "other.jpg",
+                            "externalId": "5x7", "orientation": "vertical"}],
+            }],
+            "shipping": {"option": {"externalId": "pdx_economy"},
+                         "destination": {"recipient": "Someone Else"}},
+        }
+        db.upsert_order(hardboard_order)
+        db.upsert_order(plain_print_order)
+        hardboard_spec = db.get_images_json("FS1790612839")[0]["print_spec"]
+        plain_spec     = db.get_images_json("FS0000000001")[0]["print_spec"]
+        assert hardboard_spec == "57EP"
+        assert plain_spec == "5x7prt"
+        assert hardboard_spec != plain_spec
+
     def test_items_stored_in_items_json(self, fresh_db, pickup_order):
         db.upsert_order(pickup_order)
         order = db.get_order("GS1777844776")

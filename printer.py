@@ -13,6 +13,8 @@ from typing import Optional
 
 import requests as _requests
 
+import db
+
 log = logging.getLogger("pdx.printer")
 
 IS_WINDOWS = sys.platform == "win32"
@@ -742,11 +744,12 @@ def _raw_items_to_slip_rows(items: list) -> list:
     rows = []
     for it in items or []:
         desc = it.get("description", "")
+        spec = db.spec_for_item(it)
         for img in it.get("images", []) or []:
             rows.append({
                 "filename":   img.get("filename", ""),
                 "item_desc":  desc,
-                "print_spec": img.get("externalId", ""),
+                "print_spec": spec,
             })
     return rows
 

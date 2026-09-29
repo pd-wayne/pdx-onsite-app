@@ -517,14 +517,18 @@ def create_app(poller, ui_path: str = "") -> Flask:
         orders, err = pdx_api.poll_orders(lab_id, api_key)
         if err:
             return jsonify({"ok": False, "error": err})
+        # Only items that actually carry images are print-routable — an item
+        # with none (a digital add-on, gift card, service fee, etc.) has
+        # nothing for a destination to ever download, so it shouldn't show up
+        # as a routable product needing an assignment.
         specs = {}
         for order in orders:
             for item in order.get("items", []):
-                description = item.get("description", "")
-                for img in item.get("images", []):
-                    spec = img.get("externalId", "")
-                    if spec and spec not in specs:
-                        specs[spec] = description
+                if not item.get("images"):
+                    continue
+                spec = db.spec_for_item(item)
+                if spec and spec not in specs:
+                    specs[spec] = item.get("description", "")
         added = db.discover_specs(specs)
         return jsonify({"ok": True, "found": len(specs), "added": added})
 

@@ -1755,6 +1755,16 @@ function esc(str) {
   if (str==null) return "";
   return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
+// For embedding inside a single-quoted JS string literal within an inline
+// event-handler attribute (e.g. onchange="fn('${escJsString(esc(x))}')").
+// esc() alone only guards the surrounding HTML attribute — it doesn't touch
+// backslashes or single quotes, so a value containing one (print_spec is now
+// an arbitrary PDX item SKU, not a short known crop-size code) could break
+// out of the JS string. Escape backslashes before quotes, or the backslash
+// this adds for the quote would itself need escaping.
+function escJsString(str) {
+  return String(str).replace(/\\/g,"\\\\").replace(/'/g,"\\'");
+}
 function parseItems(json) {
   try { return JSON.parse(json||"[]"); } catch { return []; }
 }
@@ -2049,7 +2059,7 @@ function renderRouting() {
           </td>
           <td>
             <select class="form-select" style="font-size:11px;padding:3px 8px"
-                    onchange="setRouting('${esc(r.print_spec).replace(/'/g,"\\'")}', this.value ? parseInt(this.value) : null)">
+                    onchange="setRouting('${escJsString(esc(r.print_spec))}', this.value ? parseInt(this.value) : null)">
               ${destOpts(r.destination_id)}
             </select>
           </td>

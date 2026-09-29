@@ -373,8 +373,8 @@ class TestDiscoverSpecsEndpoint:
         import api as pdx_api
         config.save({"lab_id": "L1", "api_key": "K1"})
         monkeypatch.setattr(pdx_api, "poll_orders", lambda lab_id, api_key: ([
-            {"items": [{"description": "2 Poster COMBO",
-                        "images": [{"externalId": "combo2_8x24"}]}]}
+            {"items": [{"externalId": "combo2_8x24", "description": "2 Poster COMBO",
+                        "images": [{"externalId": "8x24"}]}]}
         ], None))
         resp = client.post("/api/discover_specs", data="{}", content_type="application/json")
         data = resp.get_json()
@@ -386,10 +386,11 @@ class TestDiscoverSpecsEndpoint:
 
     def test_real_order_sample_YH1785181240(self, client, monkeypatch):
         """Regression test using a real PDX order export (YH1785181240,
-        Treasure Island Baseball) — confirms we key off the per-IMAGE externalId
-        (the actual print_spec/routing key, e.g. "adfadfasdf" for the 8x10 item —
-        yes, that's really what PDX sent) and pair it with the ITEM-level
-        description (e.g. "8x10"), not the item's own externalId ("8x10-1")."""
+        Treasure Island Baseball) — confirms we key off the ITEM-level
+        externalId (the real PDX product SKU, e.g. "8x10-1" for the 8x10
+        item), not each image's (which only encodes crop/print size and
+        collides across unrelated products — see
+        test_real_order_sample_FS1790612839_hardboard_collision below)."""
         import api as pdx_api
         config.save({"lab_id": "L1", "api_key": "K1"})
         real_order = {"items": [
@@ -404,7 +405,50 @@ class TestDiscoverSpecsEndpoint:
         resp = client.post("/api/discover_specs", data="{}", content_type="application/json")
         assert resp.get_json()["added"] == 3
         routing = {r["print_spec"]: r["description"] for r in client.get("/api/get_routing").get_json()}
-        assert routing == {"2x3": "2x3 Keychain", "5x7": "5x7", "adfadfasdf": "8x10"}
+        assert routing == {"2x3keychain": "2x3 Keychain", "5x7": "5x7", "8x10-1": "8x10"}
+
+    def test_real_order_sample_FS1790612839_hardboard_collision(self, client, monkeypatch):
+        """Regression test for the real bug report (Bassetti Photo, order
+        FS1790612839): a plain "5x7 Print" and a "5x7 Hardboard Easel Panel"
+        both tag their image with the same crop-size externalId ("5x7"),
+        which used to collide them onto one product_routing row and make the
+        Hardboard product permanently invisible to Discover (and silently
+        misroute it to wherever plain 5x7 prints go, if it had ever been
+        downloaded). Keying on the item's own externalId ("57EP") keeps them
+        distinct."""
+        import api as pdx_api
+        config.save({"lab_id": "L1", "api_key": "K1"})
+        plain_print_order = {"items": [
+            {"externalId": "5x7prt", "description": "5x7 Print",
+             "images": [{"externalId": "5x7", "filename": "a.jpg"}]},
+        ]}
+        hardboard_order = {"items": [
+            {"externalId": "57EP", "description": "5x7 Hardboard Easel Panel",
+             "images": [{"externalId": "5x7", "filename": "GT1_2438-45abc47b.jpg"}]},
+        ]}
+        monkeypatch.setattr(pdx_api, "poll_orders",
+                             lambda lab_id, api_key: ([plain_print_order, hardboard_order], None))
+        resp = client.post("/api/discover_specs", data="{}", content_type="application/json")
+        assert resp.get_json()["added"] == 2
+        routing = {r["print_spec"]: r["description"] for r in client.get("/api/get_routing").get_json()}
+        assert routing == {"5x7prt": "5x7 Print", "57EP": "5x7 Hardboard Easel Panel"}
+
+    def test_skips_items_with_no_images(self, client, monkeypatch):
+        """A non-photo line item (digital add-on, gift card, service fee) has
+        its own externalId but nothing for a destination to ever download —
+        it shouldn't show up as a routable product needing an assignment."""
+        import api as pdx_api
+        config.save({"lab_id": "L1", "api_key": "K1"})
+        order = {"items": [
+            {"externalId": "giftcard25", "description": "Gift Card", "images": []},
+            {"externalId": "5x7prt", "description": "5x7 Print",
+             "images": [{"externalId": "5x7", "filename": "a.jpg"}]},
+        ]}
+        monkeypatch.setattr(pdx_api, "poll_orders", lambda lab_id, api_key: ([order], None))
+        resp = client.post("/api/discover_specs", data="{}", content_type="application/json")
+        assert resp.get_json()["added"] == 1
+        routing = {r["print_spec"] for r in client.get("/api/get_routing").get_json()}
+        assert routing == {"5x7prt"}
 
 
 class TestHistoricalBackfillIngestsAllModes:
