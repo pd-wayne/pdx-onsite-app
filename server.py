@@ -13,6 +13,7 @@ import sys
 import threading
 import tkinter as tk
 import zipfile
+from collections import defaultdict
 from datetime import datetime
 from tkinter import filedialog
 from typing import Optional
@@ -114,6 +115,26 @@ def _station_tag() -> str:
     that question after an event."""
     name = request.headers.get("X-Station-Name", "").strip()
     return f" ({name})" if name else ""
+
+
+def _group_images_by_resolved_folder(order_num: str, images: list, fallback_folder: str) -> dict:
+    """Groups an order's images by the exact folder each one was actually
+    downloaded into (order_items.resolved_folder), not a single shared
+    folder — a "job" folder_mode destination puts different images from the
+    same order in different job subfolders only when different print specs
+    route to different destinations, but always keeps them out of the flat
+    legacy folder reprint/archive used to assume everything lived in. Images
+    with no matching order_item (or predating the resolved_folder column)
+    fall back to fallback_folder, the prior single-folder behavior."""
+    folder_by_filename = {
+        item["filename"]: item.get("resolved_folder")
+        for item in db.get_order_items(order_num)
+    }
+    groups = defaultdict(list)
+    for img in images:
+        folder = folder_by_filename.get(img.get("filename")) or fallback_folder
+        groups[folder].append(img)
+    return groups
 
 
 def _browse_for_folder(title: str) -> dict:
@@ -465,12 +486,16 @@ def create_app(poller, ui_path: str = "") -> Flask:
     def save_destination():
         data = request.get_json()
         try:
+            folder_mode = (data or {}).get("folder_mode", "flat")
+            if folder_mode not in ("flat", "job"):
+                return jsonify({"ok": False, "error": f"Invalid folder_mode '{folder_mode}'"})
             dest_id = db.upsert_destination(
                 name=data["name"].strip(),
                 hot_folder_path=data["hot_folder_path"].strip(),
                 is_default=bool(data.get("is_default", False)),
                 active=bool(data.get("active", True)),
                 dest_id=data.get("id") or None,
+                folder_mode=folder_mode,
             )
             return jsonify({"ok": True, "id": dest_id})
         except Exception as e:
@@ -1003,7 +1028,15 @@ def create_app(poller, ui_path: str = "") -> Flask:
             return jsonify({"ok": False, "error": "No images found"})
 
         if print_mode == "manual":
-            # Download images to hot folder now so DNP picks them up
+            # Download images to hot folder now so DNP picks them up.
+            # Pre-existing scope limit, not something this pass changes: manual
+            # print_mode has never routed per-destination (it always used this
+            # one global image_output_folder, for every studio, regardless of
+            # how many destinations or what folder_mode they're set to) — no
+            # order_items exist yet to know where each image *should* go,
+            # since this is the very first download for this order. Fixing
+            # that is a real, separate piece of work, not a regression this
+            # diff introduces.
             if not output_folder:
                 return jsonify({"ok": False, "error": "No hot folder configured"})
             api_key = cfg.get("api_key", "")
@@ -1015,8 +1048,17 @@ def create_app(poller, ui_path: str = "") -> Flask:
                 return jsonify({"ok": False, "error": err})
             db.set_download_status(order_num, "ok")
         else:
-            # Auto mode: archive files that were already auto-downloaded
-            ok, err = printer.fulfill_to_hot_folder(images, output_folder, order_num=order_num)
+            # Auto mode: archive files that were already auto-downloaded — from
+            # wherever each one actually landed (a "job" folder_mode destination's
+            # per-job subfolder, not necessarily the flat image_output_folder),
+            # or fulfill_to_hot_folder looks for the source file in the wrong
+            # place and silently no-ops instead of archiving it.
+            groups = _group_images_by_resolved_folder(order_num, images, output_folder)
+            ok, err = True, ""
+            for folder, group_images in groups.items():
+                ok, err = printer.fulfill_to_hot_folder(group_images, folder, order_num=order_num)
+                if not ok:
+                    break
             if not ok:
                 _log(f"Fulfill failed for {order_num}: {err}", "error")
                 return jsonify({"ok": False, "error": err})
@@ -1100,20 +1142,30 @@ def create_app(poller, ui_path: str = "") -> Flask:
             if not images:
                 return jsonify({"ok": False, "error": "Selected images not found in order"})
         reprint_filenames = [img.get("filename") for img in images if img.get("filename")]
-        # Try archive restore first
-        ok, err = printer.reprint_images_to_hot_folder(images, output_folder, order_num=order_num)
-        if ok:
-            db.reset_order_items_to_queued(order_num, reprint_filenames)
-            _log(f"🔁 Reprint queued: {order_num}")
-            return jsonify({"ok": True})
-        # Fall back to re-downloading from API (files may have been consumed by DNP)
-        _log(f"🔁 Archive not found, re-downloading {order_num}…")
-        ok2, err2 = printer.download_images(images, output_folder, order_num=order_num, api_key=api_key)
-        if ok2:
-            db.reset_order_items_to_queued(order_num, reprint_filenames)
-            _log(f"🔁 Reprint re-downloaded: {order_num}")
-            return jsonify({"ok": True})
-        return jsonify({"ok": False, "error": err2})
+
+        # Route each image back to the exact folder it was actually downloaded
+        # into (a "job" folder_mode destination's per-job subfolder, not just
+        # the flat legacy image_output_folder) — otherwise a reprint for a
+        # customer waiting in person lands somewhere DNP isn't watching, or
+        # mixed into whatever other job happens to be running right now.
+        groups = _group_images_by_resolved_folder(order_num, images, output_folder)
+        last_err = ""
+        for folder, group_images in groups.items():
+            # Try archive restore first
+            ok, err = printer.reprint_images_to_hot_folder(group_images, folder, order_num=order_num)
+            if ok:
+                continue
+            # Fall back to re-downloading from API (files may have been consumed by DNP)
+            _log(f"🔁 Archive not found, re-downloading {order_num}…")
+            ok, err = printer.download_images(group_images, folder, order_num=order_num, api_key=api_key)
+            if not ok:
+                last_err = err
+
+        if last_err:
+            return jsonify({"ok": False, "error": last_err})
+        db.reset_order_items_to_queued(order_num, reprint_filenames)
+        _log(f"🔁 Reprint queued: {order_num}")
+        return jsonify({"ok": True})
 
     # ── Image serving ─────────────────────────────────────────────────────────
 

@@ -8,6 +8,7 @@ directly; its bulk-vs-standard dispatch logic is exercised by monkeypatching
 IS_WINDOWS and stubbing out _print_packing_slip_gdi.
 """
 import json
+import os
 import pytest
 
 import printer
@@ -55,6 +56,70 @@ class TestFileStillInHotFolder:
 
     def test_false_when_no_filename(self, tmp_path):
         assert printer.file_still_in_hot_folder("", str(tmp_path)) is False
+
+
+# ── sanitize_folder_name / resolve_destination_folder ─────────────────────────
+# Real customer request (Bassetti Photo, Sep 2026): images should land in one
+# shared folder per job, not per order, so staff working through a stack of
+# prints by hand don't have to open a new folder per order.
+
+class TestSanitizeFolderName:
+    def test_normal_name_unchanged(self):
+        assert printer.sanitize_folder_name("GT Lions") == "GT Lions"
+
+    def test_replaces_windows_invalid_characters(self):
+        # Replaced, not deleted — see test_distinct_names_never_collide below
+        # for why that distinction is the actual point.
+        assert printer.sanitize_folder_name('GT: Lions / Fall <2026>') == "GT- Lions - Fall -2026-"
+
+    def test_distinct_names_never_collide(self):
+        # The real bug this guards: two genuinely different jobs must never
+        # sanitize down to the identical folder name and silently merge their
+        # images — which is exactly what "job" folder_mode exists to prevent.
+        assert printer.sanitize_folder_name("GT: Lions") != printer.sanitize_folder_name("GT Lions")
+        assert printer.sanitize_folder_name("Team A/B") != printer.sanitize_folder_name("Team A B")
+
+    def test_strips_trailing_dots_and_spaces(self):
+        # Windows silently drops trailing dots/spaces from folder names.
+        assert printer.sanitize_folder_name("GT Lions. ") == "GT Lions"
+
+    def test_blank_name_falls_back_to_unassigned(self):
+        assert printer.sanitize_folder_name("") == "Unassigned"
+        assert printer.sanitize_folder_name(None) == "Unassigned"
+
+    def test_long_name_is_truncated(self):
+        assert len(printer.sanitize_folder_name("x" * 500)) == 100
+
+    def test_windows_reserved_device_names_are_renamed(self):
+        # A folder literally named "CON", "PRN", etc. can't be created on
+        # Windows at all, on any drive — a plausible real job/team abbreviation.
+        assert printer.sanitize_folder_name("CON") != "CON"
+        assert printer.sanitize_folder_name("con") != "con"
+        assert printer.sanitize_folder_name("COM1") != "COM1"
+        # A name that merely contains a reserved word isn't reserved itself.
+        assert printer.sanitize_folder_name("CONcert Hall") == "CONcert Hall"
+
+
+class TestResolveDestinationFolder:
+    def test_flat_mode_returns_root_unchanged(self):
+        assert printer.resolve_destination_folder("C:\\Hot", "flat", "GT Lions") == "C:\\Hot"
+
+    def test_job_mode_adds_sanitized_job_subfolder(self):
+        expected = os.path.join("C:\\Hot", "GT Lions")
+        assert printer.resolve_destination_folder("C:\\Hot", "job", "GT Lions") == expected
+
+    def test_job_mode_sanitizes_gallery_name(self):
+        expected = os.path.join("C:\\Hot", "GT- Lions - Fall -2026-")
+        assert printer.resolve_destination_folder("C:\\Hot", "job", "GT: Lions / Fall <2026>") == expected
+
+    def test_unknown_mode_defaults_to_flat(self):
+        assert printer.resolve_destination_folder("C:\\Hot", "", "GT Lions") == "C:\\Hot"
+
+    def test_none_mode_defaults_to_flat(self):
+        # dest.get("folder_mode") with no default arg — the actual call shape
+        # every real call site uses now, relying on this fallthrough rather
+        # than repeating "flat" as a magic-string default at each site.
+        assert printer.resolve_destination_folder("C:\\Hot", None, "GT Lions") == "C:\\Hot"
 
 
 # ── locate_downloaded_image ───────────────────────────────────────────────────────
@@ -126,6 +191,26 @@ class TestLocateDownloadedImage:
     def test_no_image_output_folder_skips_dropship_fallback(self, tmp_path):
         assert printer.locate_downloaded_image("photo.jpg", [], order_num="ORD001") is None
 
+    def test_finds_file_in_job_subfolder_for_job_mode_destination(self, tmp_path):
+        dest = tmp_path / "Dest"
+        job_folder = dest / "GT Lions"
+        job_folder.mkdir(parents=True)
+        (job_folder / "photo.jpg").write_bytes(b"fake")
+        destinations = [{"hot_folder_path": str(dest), "active": True, "folder_mode": "job"}]
+        path = printer.locate_downloaded_image("photo.jpg", destinations, gallery="GT Lions")
+        assert path == str(job_folder / "photo.jpg")
+
+    def test_job_mode_destination_ignores_root_when_only_job_subfolder_has_it(self, tmp_path):
+        # Confirms the lookup actually uses the job subfolder for a "job" mode
+        # destination, not the root — a file sitting in the wrong place (root)
+        # for this mode should not be found.
+        dest = tmp_path / "Dest"
+        dest.mkdir()
+        (dest / "photo.jpg").write_bytes(b"wrong place for job mode")
+        destinations = [{"hot_folder_path": str(dest), "active": True, "folder_mode": "job"}]
+        path = printer.locate_downloaded_image("photo.jpg", destinations, gallery="Some Other Job")
+        assert path is None
+
 
 # ── _raw_items_to_slip_rows / _group_label_and_display_fields ─────────────────────
 # Confirmed against a live PDX bulk order sample: groups[] entries carry only
@@ -180,6 +265,29 @@ class TestHumanizeFieldKey:
 # turns the pages into a PDF the browser opens and prints via its own dialog.
 
 class TestBuildPackingSlipPages:
+    def test_thumbnail_resolves_through_a_job_mode_destination(self, monkeypatch, tmp_path):
+        # This is the actual wiring point (build_packing_slip_pages ->
+        # locate_downloaded_image) that makes a job-mode destination's packing
+        # slip find the right thumbnail — exercised end to end here, not just
+        # via TestLocateDownloadedImage's direct unit tests of the helper.
+        dest = tmp_path / "Dest"
+        job_folder = dest / "GT Lions"
+        job_folder.mkdir(parents=True)
+        (job_folder / "a.jpg").write_bytes(b"fake")
+        destinations = [{"hot_folder_path": str(dest), "active": True, "folder_mode": "job"}]
+
+        calls = []
+        monkeypatch.setattr(printer, "_render_packing_slip_pages",
+                            lambda *a, **k: (calls.append(a) or ["page"]))
+        order = {
+            "order_num": "ORD001", "customer_name": "Jane Doe", "gallery": "GT Lions",
+            "images_json": json.dumps([{"filename": "a.jpg", "item_desc": "8x10 Print", "print_spec": "8x10"}]),
+            "raw_json": json.dumps({"isBulkOrder": False, "shipping": {"destination": {}}}),
+        }
+        printer.build_packing_slip_pages(order, destinations)
+        thumb_paths = calls[0][3]
+        assert thumb_paths["a.jpg"] == str(job_folder / "a.jpg")
+
     def test_standard_order_renders_one_section(self, monkeypatch):
         calls = []
         monkeypatch.setattr(printer, "_render_packing_slip_pages",

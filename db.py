@@ -89,7 +89,8 @@ def init_db():
                 hot_folder_path TEXT NOT NULL,
                 is_default      INTEGER NOT NULL DEFAULT 0,
                 active          INTEGER NOT NULL DEFAULT 1,
-                last_success_at TEXT
+                last_success_at TEXT,
+                folder_mode     TEXT NOT NULL DEFAULT 'flat'
             )
         """)
         conn.execute("""
@@ -170,6 +171,12 @@ def init_db():
         ])
         _migrate_columns(conn, "product_routing", [
             ("description", "TEXT"),
+        ])
+        _migrate_columns(conn, "destinations", [
+            ("folder_mode", "TEXT NOT NULL DEFAULT 'flat'"),
+        ])
+        _migrate_columns(conn, "order_items", [
+            ("resolved_folder", "TEXT"),
         ])
 
 
@@ -346,7 +353,7 @@ def get_order(order_num: str) -> Optional[dict]:
 def _get_items_by_order_id(conn, order_id: int) -> list:
     items = conn.execute("""
         SELECT oi.id, oi.filename, oi.print_spec, oi.destination_id,
-               oi.status, oi.printed_at, d.name AS destination_name
+               oi.status, oi.printed_at, oi.resolved_folder, d.name AS destination_name
         FROM order_items oi
         LEFT JOIN destinations d ON oi.destination_id = d.id
         WHERE oi.order_id = ?
@@ -608,7 +615,7 @@ def set_primary_destination_name(name: str):
 def get_destinations() -> list:
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT id, name, hot_folder_path, is_default, active, last_success_at
+            SELECT id, name, hot_folder_path, is_default, active, last_success_at, folder_mode
             FROM destinations ORDER BY is_default DESC, name ASC
         """).fetchall()
         return [dict(r) for r in rows]
@@ -630,7 +637,7 @@ def get_default_destination() -> Optional[dict]:
 
 def upsert_destination(name: str, hot_folder_path: str,
                        is_default: bool = False, active: bool = True,
-                       dest_id: Optional[int] = None) -> int:
+                       dest_id: Optional[int] = None, folder_mode: str = "flat") -> int:
     with get_conn() as conn:
         if is_default:
             # Clear existing default before setting a new one
@@ -638,15 +645,15 @@ def upsert_destination(name: str, hot_folder_path: str,
         if dest_id:
             conn.execute("""
                 UPDATE destinations
-                SET name = ?, hot_folder_path = ?, is_default = ?, active = ?
+                SET name = ?, hot_folder_path = ?, is_default = ?, active = ?, folder_mode = ?
                 WHERE id = ?
-            """, (name, hot_folder_path, int(is_default), int(active), dest_id))
+            """, (name, hot_folder_path, int(is_default), int(active), folder_mode, dest_id))
             conn.commit()
             return dest_id
         cur = conn.execute("""
-            INSERT INTO destinations (name, hot_folder_path, is_default, active)
-            VALUES (?, ?, ?, ?)
-        """, (name, hot_folder_path, int(is_default), int(active)))
+            INSERT INTO destinations (name, hot_folder_path, is_default, active, folder_mode)
+            VALUES (?, ?, ?, ?, ?)
+        """, (name, hot_folder_path, int(is_default), int(active), folder_mode))
         conn.commit()
         return cur.lastrowid
 
@@ -769,12 +776,18 @@ def discover_specs(specs: dict) -> int:
 # ── Order items ───────────────────────────────────────────────────────────────
 
 def insert_order_item(order_id: int, filename: str,
-                      print_spec: str, destination_id: int) -> int:
+                      print_spec: str, destination_id: int, resolved_folder: str = "") -> int:
+    """resolved_folder is the exact folder this file was actually downloaded
+    into (destination root, or its per-job subfolder for a "job" folder_mode
+    destination) — snapshotted here rather than re-derived later so a
+    destination's folder_mode/path being edited after download can never
+    desync where later steps (print-detection, reprint, archive) look for
+    the file from where it actually landed."""
     with get_conn() as conn:
         cur = conn.execute("""
-            INSERT INTO order_items (order_id, filename, print_spec, destination_id, status)
-            VALUES (?, ?, ?, ?, 'queued')
-        """, (order_id, filename, print_spec, destination_id))
+            INSERT INTO order_items (order_id, filename, print_spec, destination_id, status, resolved_folder)
+            VALUES (?, ?, ?, ?, 'queued', ?)
+        """, (order_id, filename, print_spec, destination_id, resolved_folder))
         conn.commit()
         return cur.lastrowid
 
@@ -828,10 +841,13 @@ def reset_order_items_to_queued(order_num: str, filenames: list = None):
 def get_pending_order_items() -> list:
     """Order items still sitting in their hot folder, not yet confirmed printed —
     joined with orders for order_num so the caller can promote readiness once
-    a given order's items have all been consumed by the printer."""
+    a given order's items have all been consumed by the printer. Carries its
+    own snapshotted resolved_folder (the exact folder it was downloaded into)
+    rather than requiring the caller to re-derive it from the destination's
+    *current* settings, which could have changed since download."""
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT oi.id, oi.filename, oi.destination_id, o.order_num
+            SELECT oi.id, oi.filename, oi.destination_id, oi.resolved_folder, o.order_num, o.gallery
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
             WHERE oi.status = 'queued'
