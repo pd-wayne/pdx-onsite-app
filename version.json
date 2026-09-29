@@ -1,5 +1,5 @@
 {
-  "version": "2.3.2",
+  "version": "2.3.3",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.3.2 — Shipping fixes and clearer labels\n\n• Fixed: orders with a spelled-out country (e.g. \"United States\") were rejected when buying a shipping label\n• Fixed: Ready to Ship and Mark Shipped could both be open at once, and Cancel could leave Mark Shipped stuck missing\n• Confirm Shipped now stays disabled until a carrier and tracking number are actually entered\n• Test Label and Print Test Label now work even when ShipStation can't issue a free test label — it buys and automatically refunds one instead\n• Clearer one-line explanations under the shipping buttons so it's obvious what each one does\n• New \"Last Shipping Errors\" tool in Settings for diagnosing a ShipStation problem without digging through the full Activity Log"
+  "release_notes": "v2.3.3 — Job-based print folders and a routing fix\n\n• New: each print destination can now be set to \"By Job\" in Settings so every order for the same job lands in one shared folder, instead of being split out per order\n• Fixed: a plain print and a specialty product of the same size (e.g. a 5x7 print vs. a 5x7 hardboard mount) could silently share one routing entry — making one invisible in Discover Products and, if downloaded, sent to the wrong destination\n• Renamed the \"Printer\" settings label to \"Receipt Printer\" for clarity"
 }
