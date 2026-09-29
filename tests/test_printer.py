@@ -220,9 +220,27 @@ class TestLocateDownloadedImage:
 
 class TestRawItemsToSlipRows:
     def test_flattens_raw_items_with_images(self):
-        items = [{"description": "8x10 Print", "images": [{"filename": "a.jpg", "externalId": "8x10"}]}]
+        items = [{"externalId": "8x10prt", "description": "8x10 Print",
+                   "images": [{"filename": "a.jpg", "externalId": "8x10"}]}]
         rows = printer._raw_items_to_slip_rows(items)
-        assert rows == [{"filename": "a.jpg", "item_desc": "8x10 Print", "print_spec": "8x10"}]
+        assert rows == [{"filename": "a.jpg", "item_desc": "8x10 Print", "print_spec": "8x10prt"}]
+
+    def test_keys_on_item_externalid_not_image_externalid(self):
+        """Regression test for the real Bassetti Photo bug: a plain "5x7
+        Print" and a "5x7 Hardboard Easel Panel" both image-tag as "5x7"
+        (crop size), but have distinct item-level externalIds — the packing
+        slip's product label must track the distinct one."""
+        items = [
+            {"externalId": "5x7prt", "description": "5x7 Print",
+             "images": [{"filename": "a.jpg", "externalId": "5x7"}]},
+            {"externalId": "57EP", "description": "5x7 Hardboard Easel Panel",
+             "images": [{"filename": "b.jpg", "externalId": "5x7"}]},
+        ]
+        rows = printer._raw_items_to_slip_rows(items)
+        assert rows == [
+            {"filename": "a.jpg", "item_desc": "5x7 Print", "print_spec": "5x7prt"},
+            {"filename": "b.jpg", "item_desc": "5x7 Hardboard Easel Panel", "print_spec": "57EP"},
+        ]
 
     def test_empty_items_returns_empty(self):
         assert printer._raw_items_to_slip_rows([]) == []
