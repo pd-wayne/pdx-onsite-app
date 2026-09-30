@@ -1,5 +1,5 @@
 {
-  "version": "2.3.4",
+  "version": "2.3.5",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.3.4 — Fixed reprint/resend landing in the wrong folder\n\n• Fixed: Reprint Images (and auto mode's Send to Printer) could silently send images to an old, unused folder instead of the actual destination folder DNP is watching — only affected orders downloaded before v2.3.3. It now always finds the correct current folder for each product."
+  "release_notes": "v2.3.5 — Packing slips now show quantity\n\n• Fixed: packing slips listed each product's name but not how many to include — every line now shows \"(N) Product Name\" so staff can tell how many prints to pack at a glance."
 }
