@@ -167,6 +167,37 @@ class TestDownloadAndInstallIntegrityChecks:
         assert ".bak" in bat_content
         assert "move /Y" in bat_content
 
+    def test_bat_self_heals_if_new_exe_never_comes_up(self, monkeypatch, tmp_path):
+        """Real incident: a customer's auto-update swapped in a new exe that
+        then failed with PyInstaller's "Failed to load Python DLL" bootloader
+        error (almost certainly AV/Defender locking or quarantining the
+        freshly-written, unsigned exe) — leaving her stuck with a broken app
+        and no way to recover without manual file surgery. The swap script
+        must verify the new exe actually starts serving requests, and roll
+        back to the backed-up exe on its own if it never does, instead of
+        silently leaving a broken install in place."""
+        import subprocess as _subprocess
+        monkeypatch.setattr(_subprocess, "DETACHED_PROCESS", 0x00000008, raising=False)
+        monkeypatch.setattr(_subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False)
+        monkeypatch.setattr(_subprocess, "Popen", lambda *a, **k: None)
+        monkeypatch.setattr(__import__("os"), "_exit", lambda *a, **k: None)
+
+        payload = b"MZ" + b"x" * 2_000_000
+        resp = _FakeResp([payload], content_length=len(payload))
+        results = self._run_and_capture(monkeypatch, resp, tmp_path)
+
+        assert results["error"] is None
+        bat_content = (tmp_path / "_pdx_update.bat").read_text()
+        # Polls the app's own local server rather than trusting the process
+        # is merely running (a hung bootloader error dialog can keep the
+        # process alive without the app ever actually starting).
+        assert "127.0.0.1:5050" in bat_content
+        assert "errorlevel 1" in bat_content
+        # On failure: kill whatever's left, restore the backup, relaunch it.
+        assert "taskkill" in bat_content
+        assert bat_content.count("move /Y") == 3  # backup, swap-in, and rollback
+        assert bat_content.index("move /Y", bat_content.index("errorlevel 1")) > 0
+
 
 class TestPreserveSet:
     def test_db_file_preserved(self):

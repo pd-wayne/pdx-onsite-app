@@ -5,6 +5,10 @@ Checks GitHub for a newer version on startup.
 If found, shows a notification in the UI — user triggers the update.
 Update downloads the new .exe in the background, writes a swap batch file,
 launches the batch file detached, then exits so Windows can replace the exe.
+The batch file then verifies the new exe actually starts serving requests
+before deleting itself — if it doesn't, it restores the previous exe and
+relaunches that instead, so a bad update self-heals rather than leaving a
+broken app in place.
 """
 import logging
 import os
@@ -120,7 +124,16 @@ def download_and_install(download_url: str, on_progress=None, on_complete=None, 
 
             # Batch file: waits for app to exit, backs up the current exe (so a
             # bad swap can be recovered by hand — rename .bak back), swaps in
-            # the new one, relaunches, deletes itself.
+            # the new one, relaunches, then self-heals if the new exe doesn't
+            # actually come up. A PyInstaller bootloader failure (e.g. "Failed
+            # to load Python DLL" — seen in practice from AV/Defender locking
+            # or quarantining the freshly-written, unsigned exe) can still
+            # show a native error dialog and leave the process technically
+            # "running" without the app ever starting, so checking the
+            # process list isn't enough — poll the app's own local server
+            # instead. If it never responds, restore the backup and relaunch
+            # it, so a bad update fails invisibly instead of leaving the
+            # studio stuck with a broken app.
             bat = (
                 "@echo off\n"
                 "ping -n 4 127.0.0.1 > nul\n"
@@ -128,6 +141,17 @@ def download_and_install(download_url: str, on_progress=None, on_complete=None, 
                 f"move /Y \"{current_exe}\" \"{current_exe}.bak\"\n"
                 f"move /Y \"{update_exe}\" \"{current_exe}\"\n"
                 f"start \"\" \"{current_exe}\"\n"
+                "powershell -NoProfile -WindowStyle Hidden -Command "
+                "\"$ok = $false; for ($i = 0; $i -lt 10; $i++) { "
+                "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:5050/' -UseBasicParsing -TimeoutSec 2; "
+                "if ($r.StatusCode -eq 200) { $ok = $true; break } } catch {}; "
+                "Start-Sleep -Seconds 1 }; "
+                "if (-not $ok) { exit 1 }\"\n"
+                "if errorlevel 1 (\n"
+                f"    taskkill /F /IM \"{EXE_NAME}\" >nul 2>&1\n"
+                f"    move /Y \"{current_exe}.bak\" \"{current_exe}\"\n"
+                f"    start \"\" \"{current_exe}\"\n"
+                ")\n"
                 "del \"%~f0\"\n"
             )
             with open(bat_path, "w") as f:
