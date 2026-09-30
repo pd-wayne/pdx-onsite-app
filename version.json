@@ -1,5 +1,5 @@
 {
-  "version": "2.3.5",
+  "version": "2.3.6",
   "download_url": "https://github.com/pd-wayne/pdx-onsite-app/releases/latest/download/PDX_Onsite.exe",
-  "release_notes": "v2.3.5 — Packing slips now show quantity\n\n• Fixed: packing slips listed each product's name but not how many to include — every line now shows \"(N) Product Name\" so staff can tell how many prints to pack at a glance."
+  "release_notes": "v2.3.6 — Self-healing auto-update\n\n• Fixed: if an update fails to start (e.g. antivirus interferes with the new file), the app now automatically restores the previous working version instead of getting stuck showing an error on launch."
 }

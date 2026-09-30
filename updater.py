@@ -21,7 +21,7 @@ import requests
 
 log = logging.getLogger("pdx.updater")
 
-APP_VERSION = "2.3.5"
+APP_VERSION = "2.3.6"
 VERSION_URL = "https://raw.githubusercontent.com/pd-wayne/pdx-onsite-app/main/version.json"
 CHECK_TIMEOUT = 8
 EXE_NAME = "PDX_Onsite.exe"
