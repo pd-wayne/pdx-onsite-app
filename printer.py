@@ -772,6 +772,7 @@ def _parse_packing_slip_items(order: dict) -> list:
             "filename":   img.get("filename", ""),
             "item_desc":  img.get("item_desc", ""),
             "print_spec": img.get("print_spec", ""),
+            "item_qty":   img.get("item_qty", 1),
         }
         for img in images
     ]
@@ -786,11 +787,13 @@ def _raw_items_to_slip_rows(items: list) -> list:
     for it in items or []:
         desc = it.get("description", "")
         spec = db.spec_for_item(it)
+        qty = it.get("quantity", 1)
         for img in it.get("images", []) or []:
             rows.append({
                 "filename":   img.get("filename", ""),
                 "item_desc":  desc,
                 "print_spec": spec,
+                "item_qty":   qty,
             })
     return rows
 
@@ -919,7 +922,9 @@ def _render_packing_slip_pages(order_num: str, header_block: dict, items: list, 
             except Exception as e:
                 log.warning(f"[Packing Slip] Thumbnail failed for {it.get('filename')}: {e}")
         text_x = pad + thumb_size + gap * 2
-        draw.text((text_x, y + gap), it.get("item_desc") or "—", font=f_bold, fill="black")
+        qty = it.get("item_qty") or 1
+        desc_line = f"({qty}) {it.get('item_desc') or '—'}"
+        draw.text((text_x, y + gap), desc_line, font=f_bold, fill="black")
         draw.text((text_x, y + gap + lh_body), it.get("filename", ""), font=f_label, fill="#888888")
         y += row_h
 
