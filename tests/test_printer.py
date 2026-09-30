@@ -19,14 +19,21 @@ import printer
 class TestParsePackingSlipItems:
     def test_flattens_images_json(self):
         order = {"images_json": json.dumps([
-            {"filename": "a.jpg", "item_desc": "8x10 Print", "print_spec": "8x10"},
-            {"filename": "b.jpg", "item_desc": "5x7 Print", "print_spec": "5x7"},
+            {"filename": "a.jpg", "item_desc": "8x10 Print", "print_spec": "8x10", "item_qty": 2},
+            {"filename": "b.jpg", "item_desc": "5x7 Print", "print_spec": "5x7", "item_qty": 1},
         ])}
         rows = printer._parse_packing_slip_items(order)
         assert rows == [
-            {"filename": "a.jpg", "item_desc": "8x10 Print", "print_spec": "8x10"},
-            {"filename": "b.jpg", "item_desc": "5x7 Print", "print_spec": "5x7"},
+            {"filename": "a.jpg", "item_desc": "8x10 Print", "print_spec": "8x10", "item_qty": 2},
+            {"filename": "b.jpg", "item_desc": "5x7 Print", "print_spec": "5x7", "item_qty": 1},
         ]
+
+    def test_missing_item_qty_defaults_to_one(self):
+        order = {"images_json": json.dumps([
+            {"filename": "a.jpg", "item_desc": "8x10 Print", "print_spec": "8x10"},
+        ])}
+        rows = printer._parse_packing_slip_items(order)
+        assert rows[0]["item_qty"] == 1
 
     def test_empty_images_json_returns_empty_list(self):
         assert printer._parse_packing_slip_items({"images_json": "[]"}) == []
@@ -220,10 +227,16 @@ class TestLocateDownloadedImage:
 
 class TestRawItemsToSlipRows:
     def test_flattens_raw_items_with_images(self):
+        items = [{"externalId": "8x10prt", "description": "8x10 Print", "quantity": 2,
+                   "images": [{"filename": "a.jpg", "externalId": "8x10"}]}]
+        rows = printer._raw_items_to_slip_rows(items)
+        assert rows == [{"filename": "a.jpg", "item_desc": "8x10 Print", "print_spec": "8x10prt", "item_qty": 2}]
+
+    def test_missing_quantity_defaults_to_one(self):
         items = [{"externalId": "8x10prt", "description": "8x10 Print",
                    "images": [{"filename": "a.jpg", "externalId": "8x10"}]}]
         rows = printer._raw_items_to_slip_rows(items)
-        assert rows == [{"filename": "a.jpg", "item_desc": "8x10 Print", "print_spec": "8x10prt"}]
+        assert rows[0]["item_qty"] == 1
 
     def test_keys_on_item_externalid_not_image_externalid(self):
         """Regression test for the real Bassetti Photo bug: a plain "5x7
@@ -238,8 +251,8 @@ class TestRawItemsToSlipRows:
         ]
         rows = printer._raw_items_to_slip_rows(items)
         assert rows == [
-            {"filename": "a.jpg", "item_desc": "5x7 Print", "print_spec": "5x7prt"},
-            {"filename": "b.jpg", "item_desc": "5x7 Hardboard Easel Panel", "print_spec": "57EP"},
+            {"filename": "a.jpg", "item_desc": "5x7 Print", "print_spec": "5x7prt", "item_qty": 1},
+            {"filename": "b.jpg", "item_desc": "5x7 Hardboard Easel Panel", "print_spec": "57EP", "item_qty": 1},
         ]
 
     def test_empty_items_returns_empty(self):
@@ -357,7 +370,7 @@ class TestBuildPackingSlipPages:
             }),
         }
         printer.build_packing_slip_pages(order, [])
-        assert calls == [[{"filename": "z.jpg", "item_desc": "Fallback Item", "print_spec": "5x7"}]]
+        assert calls == [[{"filename": "z.jpg", "item_desc": "Fallback Item", "print_spec": "5x7", "item_qty": 1}]]
 
     def test_address_includes_street_lines_not_just_city_state_zip(self, monkeypatch):
         """Regression test: header_block["address"] used to only include
